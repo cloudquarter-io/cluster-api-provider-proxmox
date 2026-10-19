@@ -1246,6 +1246,26 @@ spec:
                         controlPlaneEligible indicates whether control plane machines may be
                         placed in this zone. Defaults to true when not set.
                       type: boolean
+                    credentialsRef:
+                      description: |-
+                        credentialsRef is a reference to a Secret holding the credentials of
+                        the Proxmox cluster that backs this zone, in the same shape as the
+                        ProxmoxCluster's own credentialsRef. When set, every machine placed in
+                        this zone is cloned, configured and deleted through that endpoint, so
+                        one CAPI cluster can span physically separate Proxmox clusters. When
+                        unset, the zone shares the ProxmoxCluster's client. If no namespace is
+                        provided, the namespace of the ProxmoxCluster is used.
+                      properties:
+                        name:
+                          description: name is unique within a namespace to reference
+                            a secret resource.
+                          type: string
+                        namespace:
+                          description: namespace defines the space within which the
+                            secret name must be unique.
+                          type: string
+                      type: object
+                      x-kubernetes-map-type: atomic
                     dnsServers:
                       description: dnsServers contains information about nameservers
                         used by the machines in this zone.
@@ -1330,6 +1350,69 @@ spec:
                       x-kubernetes-validations:
                       - message: IPv6Config addresses must be provided
                         rule: self.addresses.size() > 0
+                    networkDevices:
+                      description: |-
+                        networkDevices overrides, per device name, the bridge, model, mtu,
+                        vlan and queues of the ProxmoxMachine's network device of the same
+                        name for the machines placed in this zone. Every device named here
+                        must be one the machine declares. Addressing stays the machine's
+                        device configuration and the zone's IP config. This is how a zone
+                        attaches its machines to its own bridge and VLAN.
+                      items:
+                        description: |-
+                          ZoneNetworkDevice overrides the device-level settings of one of the
+                          ProxmoxMachine's network devices for the machines placed in a zone. It
+                          carries no addressing: that stays the machine's device configuration and
+                          the zone's IP config.
+                        properties:
+                          bridge:
+                            description: bridge is the network bridge to attach to
+                              the machine.
+                            minLength: 1
+                            type: string
+                          model:
+                            description: model is the network device model.
+                            enum:
+                            - e1000
+                            - virtio
+                            - rtl8139
+                            - vmxnet3
+                            type: string
+                          mtu:
+                            description: |-
+                              mtu is the network device Maximum Transmission Unit.
+                              When set to 1, virtio devices inherit the MTU value from the underlying bridge.
+                            format: int32
+                            type: integer
+                            x-kubernetes-validations:
+                            - message: invalid MTU value
+                              rule: self == 1 || (self >= 576 && self <= 65520)
+                          name:
+                            default: net0
+                            description: name is the network device this overrides,
+                              net0 when not set.
+                            minLength: 4
+                            pattern: ^net[0-9]+$
+                            type: string
+                          queues:
+                            description: |-
+                              queues is the number of queues assigned to the device.
+                              This value is passed to the Multiqueue field in PROXMOX.
+                            format: int32
+                            maximum: 65535
+                            minimum: 1
+                            type: integer
+                          vlan:
+                            description: vlan is the network L2 VLAN.
+                            format: int32
+                            maximum: 4094
+                            minimum: 1
+                            type: integer
+                        type: object
+                      type: array
+                      x-kubernetes-list-map-keys:
+                      - name
+                      x-kubernetes-list-type: map
                     nodes:
                       description: |-
                         nodes specifies the Proxmox nodes that belong to this zone.
@@ -1339,6 +1422,78 @@ spec:
                         type: string
                       type: array
                       x-kubernetes-list-type: set
+                    storage:
+                      description: |-
+                        storage is the target storage of the full clone for the machines
+                        placed in this zone, in place of the ProxmoxMachine's own storage.
+                      minLength: 1
+                      type: string
+                    templateSource:
+                      description: |-
+                        templateSource selects the template the machines placed in this zone
+                        are cloned from, in place of the ProxmoxMachine's own templateSource.
+                        A zone backed by its own Proxmox cluster holds its own copy of the
+                        template, which the ProxmoxMachine cannot name.
+                      properties:
+                        sourceNode:
+                          description: |-
+                            sourceNode is the initially selected proxmox node.
+                            This node will be used to locate the template VM, which will
+                            be used for cloning operations.
+
+                            Cloning will be performed according to the configuration.
+                            Setting the `Target` field will tell Proxmox to clone the
+                            VM on that target node.
+
+                            When Target is not set and the ProxmoxCluster contains
+                            a set of `AllowedNodes`, the algorithm will instead evenly
+                            distribute the VMs across the nodes from that list.
+
+                            If neither a `Target` nor `AllowedNodes` was set, the VM
+                            will be cloned onto the same node as SourceNode.
+                          minLength: 1
+                          type: string
+                        templateID:
+                          description: templateID the vm_template vmid used for cloning
+                            a new VM.
+                          format: int32
+                          type: integer
+                        templateSelector:
+                          description: |-
+                            templateSelector defines MatchTags for looking up VM templates.
+                            If a templateID is defined, templateSelector will be ignored.
+                          properties:
+                            matchPolicy:
+                              default: exact
+                              description: |-
+                                matchPolicy controls how MatchTags are evaluated against template tags.
+                                When not set, or set to "exact", the behaviour is identical to the previous implementation
+                                and requires an exact 1:1 tag match. When set to "subset", the template's tags must contain
+                                all MatchTags, but may include additional tags.
+                              enum:
+                              - exact
+                              - uniqueSubset
+                              - bestSubset
+                              type: string
+                            matchTags:
+                              description: |-
+                                matchTags specifies all tags to look for when looking up the VM template.
+                                Passed tags must be an exact 1:1 match with the tags on the template you want to use.
+                                If multiple VM templates with the same set of tags are found, provisioning will fail.
+                              items:
+                                pattern: ^(?i)[a-z0-9_][a-z0-9_\-\+\.]*$
+                                type: string
+                              minItems: 1
+                              type: array
+                              x-kubernetes-list-type: set
+                          required:
+                          - matchTags
+                          type: object
+                      type: object
+                      x-kubernetes-validations:
+                      - message: Must specify either templateID or templateSelector
+                        rule: has(self.templateSelector) || (has(self.templateID)
+                          && has(self.sourceNode))
                     zone:
                       description: zone is the name of your deployment zone.
                       pattern: ^[a-z0-9A-Z](?:[a-z0-9A-Z-_.]{0,61}[a-z0-9A-Z])?$

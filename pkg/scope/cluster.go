@@ -67,6 +67,10 @@ type ClusterScope struct {
 	ProxmoxClient  capmox.Client
 	controllerName string
 
+	// newClient builds a client from a credentials Secret reference;
+	// newProxmoxClient unless a test injects one.
+	newClient func(ctx context.Context, credentialsRef *corev1.SecretReference) (capmox.Client, error)
+
 	IPAMHelper *ipam.Helper
 }
 
@@ -108,7 +112,15 @@ func NewClusterScope(params ClusterScopeParams) (*ClusterScope, error) {
 	clusterScope.patchHelper = helper
 
 	if clusterScope.ProxmoxClient == nil {
-		if clusterScope.ProxmoxCluster.Spec.CredentialsRef == nil {
+		switch {
+		case clusterScope.ProxmoxCluster.Spec.CredentialsRef != nil:
+			// using proxmoxcluster.spec.credentialsRef
+			pmoxClient, err := clusterScope.newProxmoxClient(context.TODO(), clusterScope.ProxmoxCluster.Spec.CredentialsRef)
+			if err != nil {
+				return nil, errors.Wrap(err, "Unable to initialize ProxmoxClient")
+			}
+			clusterScope.ProxmoxClient = pmoxClient
+		case defaultProxmoxClientNeeded(clusterScope.ProxmoxCluster):
 			// Fail the cluster if no credentials found.
 			conditions.Set(clusterScope.ProxmoxCluster, metav1.Condition{
 				Type:    infrav1.ProxmoxClusterProxmoxAvailableCondition,
@@ -122,27 +134,90 @@ func NewClusterScope(params ClusterScopeParams) (*ClusterScope, error) {
 			}
 			return nil, errors.New("No credentials found, ProxmoxCluster missing credentialsRef")
 		}
-		// using proxmoxcluster.spec.credentialsRef
-		pmoxClient, err := clusterScope.setupProxmoxClient(context.TODO())
-		if err != nil {
-			return nil, errors.Wrap(err, "Unable to initialize ProxmoxClient")
-		}
-		clusterScope.ProxmoxClient = pmoxClient
 	}
 
 	return clusterScope, nil
 }
 
-func (s *ClusterScope) setupProxmoxClient(ctx context.Context) (capmox.Client, error) {
+// defaultProxmoxClientNeeded reports whether the ProxmoxCluster needs a client
+// of its own: it does unless every zone it declares carries its own
+// credentialsRef, in which case every machine placed in a zone is reached
+// through that zone's endpoint. A machine placed in no zone still needs the
+// default client, and ProxmoxClientForZone refuses it when there is none.
+func defaultProxmoxClientNeeded(proxmoxCluster *infrav1.ProxmoxCluster) bool {
+	if len(proxmoxCluster.Spec.ZoneConfigs) == 0 {
+		return true
+	}
+	for _, zc := range proxmoxCluster.Spec.ZoneConfigs {
+		if zc.CredentialsRef == nil {
+			return true
+		}
+	}
+	return false
+}
+
+// zonesWithOwnCredentials reports whether any zone of the ProxmoxCluster
+// carries its own credentialsRef: once one does, a machine's endpoint is
+// decided by its zone and an undeclared zone cannot fall back to the
+// ProxmoxCluster's client without risking the wrong Proxmox cluster.
+func zonesWithOwnCredentials(proxmoxCluster *infrav1.ProxmoxCluster) bool {
+	for _, zc := range proxmoxCluster.Spec.ZoneConfigs {
+		if zc.CredentialsRef != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// ProxmoxClientForZone returns the client that reaches the Proxmox cluster
+// backing the named zone: a client built from the zone's own credentialsRef,
+// or the ProxmoxCluster's client when the zone is empty, is the default
+// zone, or declares no credentials of its own. It fails when the
+// ProxmoxCluster's client is needed and none was configured, and when the
+// zone is not declared while another zone carries its own credentials: that
+// machine's VM lives on an endpoint the ProxmoxCluster can no longer name,
+// and reaching another one would find, or delete, the wrong VM.
+//
+// The scope lives for one reconcile, so a zone's client is built once per
+// machine reconcile, as the ProxmoxCluster's own client is.
+func (s *ClusterScope) ProxmoxClientForZone(ctx context.Context, zone string) (capmox.Client, error) {
+	zc := s.ProxmoxCluster.GetZoneConfig(zone)
+	if zc != nil && zc.CredentialsRef != nil {
+		newClient := s.newClient
+		if newClient == nil {
+			newClient = s.newProxmoxClient
+		}
+		pmoxClient, err := newClient(ctx, zc.CredentialsRef)
+		if err != nil {
+			return nil, errors.Wrapf(err, "unable to initialize ProxmoxClient for zone %q", zone)
+		}
+		return pmoxClient, nil
+	}
+
+	if zc == nil && zone != "" && zone != infrav1.DefaultZone && zonesWithOwnCredentials(s.ProxmoxCluster) {
+		return nil, errors.Errorf("zone %q is not declared by the ProxmoxCluster while other zones carry their own credentialsRef: the machine cannot be reached until the zone is declared again", zone)
+	}
+
+	if s.ProxmoxClient == nil && !defaultProxmoxClientNeeded(s.ProxmoxCluster) {
+		// The cluster runs without a default client because every zone
+		// reaches its own endpoint, and this machine is in none of them.
+		return nil, errors.Errorf("no ProxmoxClient reaches zone %q: every zone of the ProxmoxCluster carries its own credentialsRef and the machine is placed in none of them", zone)
+	}
+	return s.ProxmoxClient, nil
+}
+
+// newProxmoxClient builds a client from the credentials Secret the reference
+// names; a reference without a namespace is read from the ProxmoxCluster's.
+func (s *ClusterScope) newProxmoxClient(ctx context.Context, credentialsRef *corev1.SecretReference) (capmox.Client, error) {
 	// get the credentials secret
 	secret := corev1.Secret{}
-	namespace := s.ProxmoxCluster.Spec.CredentialsRef.Namespace
+	namespace := credentialsRef.Namespace
 	if len(namespace) == 0 {
 		namespace = s.ProxmoxCluster.GetNamespace()
 	}
 	err := s.client.Get(ctx, client.ObjectKey{
 		Namespace: namespace,
-		Name:      s.ProxmoxCluster.Spec.CredentialsRef.Name,
+		Name:      credentialsRef.Name,
 	}, &secret)
 	if err != nil {
 		if apierrors.IsNotFound(err) {
@@ -150,7 +225,7 @@ func (s *ClusterScope) setupProxmoxClient(ctx context.Context) (capmox.Client, e
 				Type:    infrav1.ProxmoxClusterProxmoxAvailableCondition,
 				Status:  metav1.ConditionFalse,
 				Reason:  infrav1.ProxmoxClusterProxmoxAvailableCredentialsNotFoundReason,
-				Message: "credentials secret not found",
+				Message: fmt.Sprintf("credentials secret %s/%s not found", namespace, credentialsRef.Name),
 			})
 		}
 		return nil, errors.Wrap(err, "failed to get credentials secret")

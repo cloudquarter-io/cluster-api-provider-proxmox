@@ -79,6 +79,11 @@ func (*ProxmoxCluster) ValidateCreate(_ context.Context, obj runtime.Object) (wa
 		return warnings, err
 	}
 
+	if err := validateZoneConfigs(&cluster.Spec, cluster.GroupVersionKind().GroupKind(), cluster.GetName()); err != nil {
+		warnings = append(warnings, fmt.Sprintf("cannot create proxmox cluster %s", cluster.GetName()))
+		return warnings, err
+	}
+
 	return warnings, nil
 }
 
@@ -99,7 +104,36 @@ func (*ProxmoxCluster) ValidateUpdate(_ context.Context, _ runtime.Object, newOb
 		return warnings, err
 	}
 
+	if err := validateZoneConfigs(&newCluster.Spec, newCluster.GroupVersionKind().GroupKind(), newCluster.GetName()); err != nil {
+		warnings = append(warnings, fmt.Sprintf("cannot update proxmox cluster %s", newCluster.GetName()))
+		return warnings, err
+	}
+
 	return warnings, nil
+}
+
+// validateZoneConfigs refuses what the CRD schema cannot express about the
+// zones: the reserved name of the implicit zone, which is the ProxmoxCluster
+// itself and cannot carry inputs of its own, and a credentialsRef that names
+// no Secret. Zone names are unique by construction, the schema keys the list
+// by zone.
+func validateZoneConfigs(spec *infrav1.ProxmoxClusterSpec, gk schema.GroupKind, name string) error {
+	var allErrs field.ErrorList
+	for i, zc := range spec.ZoneConfigs {
+		zonePath := field.NewPath("spec", "zoneConfig").Index(i)
+		if ptr.Deref(zc.Zone, "") == infrav1.DefaultZone {
+			allErrs = append(allErrs, field.Invalid(zonePath.Child("zone"), infrav1.DefaultZone,
+				"the name of the implicit zone is reserved: it is the ProxmoxCluster's own IP config and endpoint"))
+		}
+		if zc.CredentialsRef != nil && zc.CredentialsRef.Name == "" {
+			allErrs = append(allErrs, field.Required(zonePath.Child("credentialsRef", "name"),
+				"a zone credentialsRef must name the Secret holding the zone's Proxmox credentials"))
+		}
+	}
+	if len(allErrs) == 0 {
+		return nil
+	}
+	return apierrors.NewInvalid(gk, name, allErrs)
 }
 
 func validateControlPlaneEndpoint(spec *infrav1.ProxmoxClusterSpec, gk schema.GroupKind, name string) error {

@@ -21,6 +21,7 @@ import (
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -105,6 +106,33 @@ var _ = Describe("Controller Test", func() {
 			}
 			g.Expect(k8sClient.Create(testEnv.GetContext(), &cluster)).To(MatchError(ContainSubstring("addresses may not contain the endpoint IP")))
 		})
+
+		It("should disallow a zone named after the implicit default zone", func() {
+			cluster := validProxmoxCluster("test-zone-default")
+			cluster.Spec.ZoneConfigs = []infrav1.ZoneConfigSpec{zoneConfig(infrav1.DefaultZone, "10.10.20.0/24")}
+			g.Expect(k8sClient.Create(testEnv.GetContext(), &cluster)).To(MatchError(ContainSubstring("spec.zoneConfig[0].zone")))
+			g.Expect(k8sClient.Create(testEnv.GetContext(), &cluster)).To(MatchError(ContainSubstring("reserved")))
+		})
+
+		It("should disallow a zone credentialsRef without a name", func() {
+			cluster := validProxmoxCluster("test-zone-credentials")
+			zone := zoneConfig("dc-a", "10.10.20.0/24")
+			zone.CredentialsRef = &corev1.SecretReference{Namespace: metav1.NamespaceDefault}
+			cluster.Spec.ZoneConfigs = []infrav1.ZoneConfigSpec{zone}
+			g.Expect(k8sClient.Create(testEnv.GetContext(), &cluster)).To(MatchError(ContainSubstring("spec.zoneConfig[0].credentialsRef.name")))
+		})
+
+		It("should allow zones with their own credentials, template, storage and devices", func() {
+			cluster := validProxmoxCluster("test-zone-inputs")
+			zone := zoneConfig("dc-a", "10.10.20.0/24")
+			zone.CredentialsRef = &corev1.SecretReference{Name: "pve-a"}
+			zone.TemplateSource = &infrav1.TemplateSource{SourceNode: new("pve-a1"), TemplateID: new(int32(9000))}
+			zone.Storage = new("ceph-a")
+			zone.NetworkDevices = []infrav1.ZoneNetworkDevice{{Name: "net0", Bridge: new("vmbr1"), VLAN: new(int32(110))}}
+			cluster.Spec.ZoneConfigs = []infrav1.ZoneConfigSpec{zone}
+			g.Expect(k8sClient.Create(testEnv.GetContext(), &cluster)).To(Succeed())
+			g.Expect(client.IgnoreNotFound(k8sClient.Delete(testEnv.GetContext(), &cluster))).To(Succeed())
+		})
 	})
 
 	Context("update proxmox cluster", func() {
@@ -117,6 +145,27 @@ var _ = Describe("Controller Test", func() {
 			cluster.Spec.ControlPlaneEndpoint.Host = "10.10.10.2"
 
 			g.Expect(k8sClient.Update(testEnv.GetContext(), &cluster)).To(MatchError(ContainSubstring("addresses may not contain the endpoint IP")))
+
+			g.Eventually(func(g Gomega) {
+				g.Expect(client.IgnoreNotFound(k8sClient.Delete(testEnv.GetContext(), &cluster))).To(Succeed())
+			}).WithTimeout(time.Second * 10).
+				WithPolling(time.Second).
+				Should(Succeed())
+		})
+
+		It("should disallow adding a reserved zone name or a nameless zone credentialsRef", func() {
+			cluster := validProxmoxCluster("test-cluster-zones")
+			g.Expect(k8sClient.Create(testEnv.GetContext(), &cluster)).To(Succeed())
+
+			g.Expect(k8sClient.Get(testEnv.GetContext(), client.ObjectKeyFromObject(&cluster), &cluster)).To(Succeed())
+			cluster.Spec.ZoneConfigs = []infrav1.ZoneConfigSpec{zoneConfig(infrav1.DefaultZone, "10.10.20.0/24")}
+			g.Expect(k8sClient.Update(testEnv.GetContext(), &cluster)).To(MatchError(ContainSubstring("reserved")))
+
+			g.Expect(k8sClient.Get(testEnv.GetContext(), client.ObjectKeyFromObject(&cluster), &cluster)).To(Succeed())
+			zone := zoneConfig("dc-a", "10.10.20.0/24")
+			zone.CredentialsRef = &corev1.SecretReference{Namespace: metav1.NamespaceDefault}
+			cluster.Spec.ZoneConfigs = []infrav1.ZoneConfigSpec{zone}
+			g.Expect(k8sClient.Update(testEnv.GetContext(), &cluster)).To(MatchError(ContainSubstring("spec.zoneConfig[0].credentialsRef.name")))
 
 			g.Eventually(func(g Gomega) {
 				g.Expect(client.IgnoreNotFound(k8sClient.Delete(testEnv.GetContext(), &cluster))).To(Succeed())
@@ -158,4 +207,18 @@ func invalidProxmoxCluster(name string) infrav1.ProxmoxCluster {
 	}
 
 	return cl
+}
+
+// zoneConfig is a zone the CRD schema accepts: a name, an IPv4 pool on the
+// given network and a resolver.
+func zoneConfig(name, cidr string) infrav1.ZoneConfigSpec {
+	return infrav1.ZoneConfigSpec{
+		Zone: new(name),
+		IPv4Config: &infrav1.IPConfigSpec{
+			Addresses: []string{cidr},
+			Prefix:    24,
+			Gateway:   "10.10.10.1",
+		},
+		DNSServers: []string{"8.8.8.8"},
+	}
 }

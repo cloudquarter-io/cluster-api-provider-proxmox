@@ -32,6 +32,7 @@ import (
 
 	infrav1 "github.com/ionos-cloud/cluster-api-provider-proxmox/api/v1alpha2"
 	"github.com/ionos-cloud/cluster-api-provider-proxmox/pkg/kubernetes/ipam"
+	capmoxClient "github.com/ionos-cloud/cluster-api-provider-proxmox/pkg/proxmox"
 	"github.com/ionos-cloud/cluster-api-provider-proxmox/pkg/proxmox/goproxmox"
 	"github.com/ionos-cloud/cluster-api-provider-proxmox/pkg/proxmox/proxmoxtest"
 )
@@ -135,6 +136,118 @@ func TestNewClusterScope_SetupProxmoxClient(t *testing.T) {
 
 	_, err = NewClusterScope(params)
 	require.Error(t, err)
+}
+
+func TestNewClusterScope_NoDefaultClientWhenEveryZoneHasCredentials(t *testing.T) {
+	k8sClient := getFakeClient(t)
+
+	proxmoxCluster := &infrav1.ProxmoxCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "proxmoxcluster", Namespace: "default"},
+		Spec: infrav1.ProxmoxClusterSpec{
+			ZoneConfigs: []infrav1.ZoneConfigSpec{
+				{Zone: new("dc-a"), CredentialsRef: &corev1.SecretReference{Name: "pve-a"}},
+				{Zone: new("dc-b"), CredentialsRef: &corev1.SecretReference{Name: "pve-b"}},
+			},
+		},
+	}
+
+	// No controller credentials, no spec.credentialsRef: the cluster needs no
+	// default client because every zone reaches its own endpoint.
+	params := ClusterScopeParams{Client: k8sClient, Cluster: &clusterv1.Cluster{}, ProxmoxCluster: proxmoxCluster, IPAMHelper: &ipam.Helper{}}
+	clusterScope, err := NewClusterScope(params)
+	require.NoError(t, err)
+	require.Nil(t, clusterScope.ProxmoxClient)
+	require.Nil(t, conditions.Get(proxmoxCluster, infrav1.ProxmoxClusterProxmoxAvailableCondition))
+
+	// One zone without its own credentials brings the default client back,
+	// and its absence fails the cluster as before.
+	proxmoxCluster.Spec.ZoneConfigs[1].CredentialsRef = nil
+	_, err = NewClusterScope(params)
+	require.Error(t, err)
+	cond := conditions.Get(proxmoxCluster, infrav1.ProxmoxClusterProxmoxAvailableCondition)
+	require.NotNil(t, cond)
+	require.Equal(t, metav1.ConditionFalse, cond.Status)
+}
+
+func TestClusterScope_ProxmoxClientForZone(t *testing.T) {
+	k8sClient := getFakeClient(t)
+	defaultClient := proxmoxtest.NewMockClient(t)
+	zoneClient := proxmoxtest.NewMockClient(t)
+
+	proxmoxCluster := &infrav1.ProxmoxCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "proxmoxcluster", Namespace: "default"},
+		Spec: infrav1.ProxmoxClusterSpec{
+			ZoneConfigs: []infrav1.ZoneConfigSpec{
+				{Zone: new("shared")},
+				{Zone: new("dc-a"), CredentialsRef: &corev1.SecretReference{Name: "pve-a"}},
+			},
+		},
+	}
+	clusterScope := &ClusterScope{client: k8sClient, ProxmoxCluster: proxmoxCluster, ProxmoxClient: defaultClient}
+
+	t.Run("no zone and a zone without credentials share the default client", func(t *testing.T) {
+		for _, zone := range []string{"", "shared"} {
+			got, err := clusterScope.ProxmoxClientForZone(context.Background(), zone)
+			require.NoError(t, err, zone)
+			require.Same(t, defaultClient, got, zone)
+		}
+	})
+
+	t.Run("a zone whose credentials Secret is missing fails and reports it", func(t *testing.T) {
+		_, err := clusterScope.ProxmoxClientForZone(context.Background(), "dc-a")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), `zone "dc-a"`)
+		cond := conditions.Get(proxmoxCluster, infrav1.ProxmoxClusterProxmoxAvailableCondition)
+		require.NotNil(t, cond)
+		require.Contains(t, cond.Message, "default/pve-a")
+	})
+
+	t.Run("a zone with credentials gets a client built from them", func(t *testing.T) {
+		var built *corev1.SecretReference
+		clusterScope.newClient = func(_ context.Context, ref *corev1.SecretReference) (capmoxClient.Client, error) {
+			built = ref
+			return zoneClient, nil
+		}
+		defer func() { clusterScope.newClient = nil }()
+		got, err := clusterScope.ProxmoxClientForZone(context.Background(), "dc-a")
+		require.NoError(t, err)
+		require.Same(t, zoneClient, got)
+		require.Equal(t, "pve-a", built.Name)
+	})
+
+	t.Run("an undeclared zone is refused once any zone has its own credentials", func(t *testing.T) {
+		_, err := clusterScope.ProxmoxClientForZone(context.Background(), "gone")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), `zone "gone" is not declared`)
+	})
+
+	t.Run("the default zone is the ProxmoxCluster itself, whatever the other zones carry", func(t *testing.T) {
+		got, err := clusterScope.ProxmoxClientForZone(context.Background(), infrav1.DefaultZone)
+		require.NoError(t, err)
+		require.Same(t, defaultClient, got)
+	})
+
+	t.Run("an undeclared zone shares the default client when no zone has credentials", func(t *testing.T) {
+		sharedOnly := &ClusterScope{ProxmoxClient: defaultClient, ProxmoxCluster: &infrav1.ProxmoxCluster{
+			Spec: infrav1.ProxmoxClusterSpec{ZoneConfigs: []infrav1.ZoneConfigSpec{{Zone: new("shared")}}},
+		}}
+		got, err := sharedOnly.ProxmoxClientForZone(context.Background(), "gone")
+		require.NoError(t, err)
+		require.Same(t, defaultClient, got)
+	})
+
+	t.Run("without a default client a machine outside every credentialed zone is refused", func(t *testing.T) {
+		allOwn := &ClusterScope{client: k8sClient, ProxmoxCluster: &infrav1.ProxmoxCluster{
+			Spec: infrav1.ProxmoxClusterSpec{
+				ZoneConfigs: []infrav1.ZoneConfigSpec{
+					{Zone: new("dc-a"), CredentialsRef: &corev1.SecretReference{Name: "pve-a"}},
+				},
+			},
+		}}
+		_, err := allOwn.ProxmoxClientForZone(context.Background(), "")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), "placed in none of them")
+	})
 }
 
 func TestListProxmoxMachinesForCluster(t *testing.T) {

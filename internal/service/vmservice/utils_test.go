@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 
 	infrav1 "github.com/ionos-cloud/cluster-api-provider-proxmox/api/v1alpha2"
 	"github.com/ionos-cloud/cluster-api-provider-proxmox/pkg/network"
@@ -237,6 +238,27 @@ func TestShouldUpdateNetworkDevices_NoUpdate(t *testing.T) {
 	machineScope.SetVirtualMachine(newVMWithNets("virtio=A6:23:64:4D:84:CD,bridge=vmbr0,mtu=1500", "virtio=A6:23:64:4D:84:CD,bridge=vmbr1,mtu=1500"))
 
 	require.False(t, shouldUpdateNetworkDevices(machineScope))
+}
+
+func TestShouldUpdateNetworkDevices_ZoneOverride(t *testing.T) {
+	machineScope, _, _ := setupReconcilerTest(t, func(machine *clusterv1.Machine, infraCluster *infrav1.ProxmoxCluster, infraMachine *infrav1.ProxmoxMachine) {
+		machine.Spec.FailureDomain = zoneA
+		infraCluster.Spec.ZoneConfigs = []infrav1.ZoneConfigSpec{{
+			Zone:           new(zoneA),
+			NetworkDevices: []infrav1.ZoneNetworkDevice{{Name: "net1", Bridge: new("vmbr-a")}},
+		}}
+		infraMachine.Spec.Network = &infrav1.NetworkSpec{
+			NetworkDevices: []infrav1.NetworkDevice{
+				{Bridge: new("vmbr0"), Model: new("virtio"), MTU: new(int32(1500))},
+				{Name: "net1", Bridge: new("vmbr1"), Model: new("virtio"), MTU: new(int32(1500))},
+			},
+		}
+	})
+	// The VM matches the machine's own devices, but the zone moves net1 to
+	// its bridge, so the guard must fire.
+	machineScope.SetVirtualMachine(newVMWithNets("virtio=A6:23:64:4D:84:CD,bridge=vmbr0,mtu=1500", "virtio=A6:23:64:4D:84:CD,bridge=vmbr1,mtu=1500"))
+
+	require.True(t, shouldUpdateNetworkDevices(machineScope))
 }
 
 func TestExtractNetworkVLAN(t *testing.T) {

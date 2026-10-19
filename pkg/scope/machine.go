@@ -36,6 +36,7 @@ import (
 
 	infrav1 "github.com/ionos-cloud/cluster-api-provider-proxmox/api/v1alpha2"
 	"github.com/ionos-cloud/cluster-api-provider-proxmox/pkg/kubernetes/ipam"
+	capmox "github.com/ionos-cloud/cluster-api-provider-proxmox/pkg/proxmox"
 )
 
 // MachineScopeParams defines the input parameters used to create a new MachineScope.
@@ -75,6 +76,18 @@ type MachineScope struct {
 	// construction so reconciliation paths that must proceed without the
 	// zone (e.g. deletion) still get a usable scope.
 	failureDomainErr error
+
+	// zoneDevicesErr records a zone network device override that names no
+	// device of the ProxmoxMachine. Kept on the scope like failureDomainErr:
+	// the override only matters to the clone and its configuration, so
+	// deletion proceeds with it unresolved.
+	zoneDevicesErr error
+
+	// proxmoxClient reaches the Proxmox cluster backing the machine's zone,
+	// resolved once by NewMachineScope. Every Proxmox call about the machine
+	// goes through it, so a zone backed by its own Proxmox cluster clones,
+	// configures and deletes its machines on that endpoint.
+	proxmoxClient capmox.Client
 }
 
 // NewMachineScope creates a new MachineScope from the supplied parameters.
@@ -119,6 +132,14 @@ func NewMachineScope(params MachineScopeParams) (*MachineScope, error) {
 		IPAMHelper:     params.IPAMHelper,
 	}
 	m.failureDomainErr = m.resolvePlacement()
+	m.zoneDevicesErr = m.validateZoneDevices()
+
+	pmoxClient, err := params.InfraCluster.ProxmoxClientForZone(context.TODO(), ptr.Deref(m.zone, ""))
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to resolve the Proxmox client of the machine's zone")
+	}
+	m.proxmoxClient = pmoxClient
+
 	return m, nil
 }
 
@@ -137,6 +158,10 @@ func (err FailureDomainNotFoundError) Error() string {
 //
 //   - allowed nodes: failure domain zone nodes > ProxmoxMachine spec > ProxmoxCluster spec
 //   - zone: failure domain > Spec.Network.Zone > nil (the default zone)
+//
+// The zone also decides the clone inputs the TemplateID, SourceNode, Storage
+// and NetworkDevices accessors read: the zone's, where it declares them,
+// over the ProxmoxMachine's.
 //
 // When the referenced failure domain is not configured in the ProxmoxCluster
 // zones it returns a FailureDomainNotFoundError; the remaining fields are
@@ -192,6 +217,160 @@ func (m *MachineScope) FailureDomainError() error {
 	return m.failureDomainErr
 }
 
+// zoneConfig returns the configuration of the zone resolved for the machine,
+// or nil when the machine is in no zone or in one the ProxmoxCluster does not
+// declare. The clone-input accessors below read the zone's values through it
+// over the ProxmoxMachine's; they read on every call because the specs are
+// immutable within a reconcile, so there is no state to capture.
+func (m *MachineScope) zoneConfig() *infrav1.ZoneConfigSpec {
+	if m.zone == nil {
+		return nil
+	}
+	return m.InfraCluster.ProxmoxCluster.GetZoneConfig(*m.zone)
+}
+
+// templateSource is the zone's template source where it declares one, else
+// the ProxmoxMachine's.
+func (m *MachineScope) templateSource() infrav1.TemplateSource {
+	if zc := m.zoneConfig(); zc != nil && zc.TemplateSource != nil {
+		return *zc.TemplateSource
+	}
+	return m.ProxmoxMachine.Spec.TemplateSource
+}
+
+// deviceName is the name a network device is addressed by: net0 when none is
+// set, as everywhere else.
+func deviceName(name infrav1.NetName) infrav1.NetName {
+	if name == "" {
+		return infrav1.DefaultNetworkDevice
+	}
+	return name
+}
+
+// ZoneDevicesError returns the error validateZoneDevices found, or nil.
+// Callers that are about to provision or configure the VM must treat a
+// non-nil result as "zone network devices invalid"; deletion ignores it.
+func (m *MachineScope) ZoneDevicesError() error {
+	return m.zoneDevicesErr
+}
+
+// validateZoneDevices refuses a zone device override that names no device of
+// the ProxmoxMachine: an override is a change to a device the machine
+// declares and whose addressing the machine owns, never a device of its own.
+func (m *MachineScope) validateZoneDevices() error {
+	zc := m.zoneConfig()
+	if zc == nil || len(zc.NetworkDevices) == 0 {
+		return nil
+	}
+	var machineDevices []infrav1.NetworkDevice
+	if m.ProxmoxMachine.Spec.Network != nil {
+		machineDevices = m.ProxmoxMachine.Spec.Network.NetworkDevices
+	}
+	for _, override := range zc.NetworkDevices {
+		declared := false
+		for _, d := range machineDevices {
+			if deviceName(d.Name) == deviceName(override.Name) {
+				declared = true
+				break
+			}
+		}
+		if !declared {
+			return errors.Errorf("zone %q overrides network device %q, which the ProxmoxMachine does not declare", ptr.Deref(m.zone, ""), deviceName(override.Name))
+		}
+	}
+	return nil
+}
+
+// mergeNetworkDevices applies the zone's device overrides onto the machine's
+// devices: a zone device sets the bridge, model, mtu, vlan and queues of the
+// machine device of the same name where it sets them. Addressing is never
+// taken from the zone, and a zone device the machine does not declare is
+// left out (validateZoneDevices refuses it before the scope is used).
+func mergeNetworkDevices(machineDevices []infrav1.NetworkDevice, zoneDevices []infrav1.ZoneNetworkDevice) []infrav1.NetworkDevice {
+	if len(zoneDevices) == 0 {
+		return machineDevices
+	}
+	merged := make([]infrav1.NetworkDevice, len(machineDevices))
+	copy(merged, machineDevices)
+	for _, override := range zoneDevices {
+		for i := range merged {
+			if deviceName(merged[i].Name) != deviceName(override.Name) {
+				continue
+			}
+			if override.Bridge != nil {
+				merged[i].Bridge = override.Bridge
+			}
+			if override.Model != nil {
+				merged[i].Model = override.Model
+			}
+			if override.MTU != nil {
+				merged[i].MTU = override.MTU
+			}
+			if override.VLAN != nil {
+				merged[i].VLAN = override.VLAN
+			}
+			if override.Queues != nil {
+				merged[i].Queues = override.Queues
+			}
+		}
+	}
+	return merged
+}
+
+// ProxmoxClient returns the client that reaches the Proxmox cluster backing
+// the machine's zone, resolved once at scope construction.
+func (m *MachineScope) ProxmoxClient() capmox.Client {
+	return m.proxmoxClient
+}
+
+// TemplateID returns the template "vmid" the machine is cloned from, or -1
+// when the template is selected by tags; the zone's template source wins
+// over the ProxmoxMachine's.
+func (m *MachineScope) TemplateID() int32 {
+	return m.templateSource().GetTemplateID()
+}
+
+// TemplateSelectorTags returns the tags the template must carry, resolved
+// like TemplateID.
+func (m *MachineScope) TemplateSelectorTags() []string {
+	return m.templateSource().GetTemplateSelectorTags()
+}
+
+// TemplateMatchPolicy returns the template selection policy, resolved like
+// TemplateID.
+func (m *MachineScope) TemplateMatchPolicy() infrav1.TemplateMatchPolicy {
+	return m.templateSource().GetTemplateMatchPolicy()
+}
+
+// SourceNode returns the Proxmox node the template is cloned from, resolved
+// like TemplateID; "" when none is named.
+func (m *MachineScope) SourceNode() string {
+	return m.templateSource().GetSourceNode()
+}
+
+// Storage returns the target storage of the full clone: the zone's where it
+// declares one, else the ProxmoxMachine's; nil when neither does.
+func (m *MachineScope) Storage() *string {
+	if zc := m.zoneConfig(); zc != nil && zc.Storage != nil {
+		return zc.Storage
+	}
+	return m.ProxmoxMachine.Spec.Storage
+}
+
+// NetworkDevices returns the machine's network devices with the zone's
+// overrides applied; nil when the ProxmoxMachine declares no network, since
+// an override only changes a device the machine declares.
+func (m *MachineScope) NetworkDevices() []infrav1.NetworkDevice {
+	if m.ProxmoxMachine.Spec.Network == nil {
+		return nil
+	}
+	machineDevices := m.ProxmoxMachine.Spec.Network.NetworkDevices
+	if zc := m.zoneConfig(); zc != nil {
+		return mergeNetworkDevices(machineDevices, zc.NetworkDevices)
+	}
+	return machineDevices
+}
+
 // Name returns the ProxmoxMachine name.
 func (m *MachineScope) Name() string {
 	return m.ProxmoxMachine.Name
@@ -223,7 +402,7 @@ func (m *MachineScope) LocateProxmoxNode() string {
 
 	node := m.InfraCluster.ProxmoxCluster.GetNode(m.Name(), util.IsControlPlaneMachine(m.Machine))
 	if node == "" {
-		node = m.ProxmoxMachine.GetSourceNode()
+		node = m.SourceNode()
 	}
 
 	return node

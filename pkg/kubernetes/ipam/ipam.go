@@ -181,7 +181,7 @@ func (h *Helper) GetInClusterPools(ctx context.Context, moxm *infrav1.ProxmoxMac
 	namespace := moxm.ObjectMeta.Namespace
 
 	// Use zoneOverride if provided (from failure domain), else fall back to spec.
-	specZone := "default"
+	specZone := infrav1.DefaultZone
 	if moxm.Spec.Network != nil && moxm.Spec.Network.Zone != nil {
 		specZone = *moxm.Spec.Network.Zone
 	}
@@ -313,7 +313,7 @@ func (h *Helper) CreateOrUpdateInClusterIPPool(ctx context.Context) error {
 						if zoneSpec.Zone != nil {
 							return map[string]string{infrav1.ProxmoxZoneLabel: *zoneSpec.Zone}
 						}
-						return map[string]string{infrav1.ProxmoxZoneLabel: "default"}
+						return map[string]string{infrav1.ProxmoxZoneLabel: infrav1.DefaultZone}
 					}(),
 				},
 				Spec: ipamicv1.InClusterIPPoolSpec{

@@ -29,6 +29,11 @@ import (
 )
 
 const (
+	// DefaultZone is the name of the implicit zone: the ProxmoxCluster's own
+	// IP config, pools and endpoint. A machine naming it, or naming no zone,
+	// is placed on the ProxmoxCluster itself.
+	DefaultZone = "default"
+
 	// ProxmoxClusterKind is the ProxmoxCluster kind.
 	ProxmoxClusterKind = "ProxmoxCluster"
 	// ClusterFinalizer allows cleaning up resources associated with a
@@ -161,6 +166,80 @@ type ZoneConfigSpec struct {
 	// placed in this zone. Defaults to true when not set.
 	// +optional
 	ControlPlaneEligible *bool `json:"controlPlaneEligible,omitempty"`
+
+	// credentialsRef is a reference to a Secret holding the credentials of
+	// the Proxmox cluster that backs this zone, in the same shape as the
+	// ProxmoxCluster's own credentialsRef. When set, every machine placed in
+	// this zone is cloned, configured and deleted through that endpoint, so
+	// one CAPI cluster can span physically separate Proxmox clusters. When
+	// unset, the zone shares the ProxmoxCluster's client. If no namespace is
+	// provided, the namespace of the ProxmoxCluster is used.
+	// +optional
+	CredentialsRef *corev1.SecretReference `json:"credentialsRef,omitempty"`
+
+	// templateSource selects the template the machines placed in this zone
+	// are cloned from, in place of the ProxmoxMachine's own templateSource.
+	// A zone backed by its own Proxmox cluster holds its own copy of the
+	// template, which the ProxmoxMachine cannot name.
+	// +optional
+	TemplateSource *TemplateSource `json:"templateSource,omitempty"`
+
+	// storage is the target storage of the full clone for the machines
+	// placed in this zone, in place of the ProxmoxMachine's own storage.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	Storage *string `json:"storage,omitempty"`
+
+	// networkDevices overrides, per device name, the bridge, model, mtu,
+	// vlan and queues of the ProxmoxMachine's network device of the same
+	// name for the machines placed in this zone. Every device named here
+	// must be one the machine declares. Addressing stays the machine's
+	// device configuration and the zone's IP config. This is how a zone
+	// attaches its machines to its own bridge and VLAN.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	NetworkDevices []ZoneNetworkDevice `json:"networkDevices,omitempty"`
+}
+
+// ZoneNetworkDevice overrides the device-level settings of one of the
+// ProxmoxMachine's network devices for the machines placed in a zone. It
+// carries no addressing: that stays the machine's device configuration and
+// the zone's IP config.
+type ZoneNetworkDevice struct {
+	// name is the network device this overrides, net0 when not set.
+	// +default="net0"
+	// +optional
+	Name NetName `json:"name,omitempty"`
+
+	// bridge is the network bridge to attach to the machine.
+	// +kubebuilder:validation:MinLength=1
+	// +optional
+	Bridge *string `json:"bridge,omitempty"`
+
+	// model is the network device model.
+	// +optional
+	// +kubebuilder:validation:Enum=e1000;virtio;rtl8139;vmxnet3
+	Model *string `json:"model,omitempty"`
+
+	// mtu is the network device Maximum Transmission Unit.
+	// When set to 1, virtio devices inherit the MTU value from the underlying bridge.
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="self == 1 || (self >= 576 && self <= 65520)",message="invalid MTU value"
+	MTU MTU `json:"mtu,omitempty"`
+
+	// vlan is the network L2 VLAN.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=4094
+	VLAN *int32 `json:"vlan,omitempty"`
+
+	// queues is the number of queues assigned to the device.
+	// This value is passed to the Multiqueue field in PROXMOX.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	Queues *int32 `json:"queues,omitempty"`
 }
 
 // IPConfigSpec contains information about available IP config.
@@ -380,7 +459,7 @@ func (c *ProxmoxCluster) AddInClusterZoneRef(pool client.Object) {
 
 	// Add to default zone (as that has no label yet)
 	if !exists {
-		zone = "default"
+		zone = DefaultZone
 	}
 
 	if c.Status.InClusterZoneRef == nil {
@@ -547,9 +626,19 @@ func (c *ProxmoxCluster) addNodeLocation(loc NodeLocation, isControlPlane bool) 
 // GetZoneNodes returns the Proxmox node names for a given zone name.
 // Returns nil if the zone is not found or has no explicit nodes configured.
 func (c *ProxmoxCluster) GetZoneNodes(zoneName string) []string {
-	for _, zc := range c.Spec.ZoneConfigs {
-		if ptr.Deref(zc.Zone, "") == zoneName {
-			return zc.Nodes
+	if zc := c.GetZoneConfig(zoneName); zc != nil {
+		return zc.Nodes
+	}
+
+	return nil
+}
+
+// GetZoneConfig returns the configuration of the named zone, or nil when the
+// ProxmoxCluster declares no such zone.
+func (c *ProxmoxCluster) GetZoneConfig(zoneName string) *ZoneConfigSpec {
+	for i := range c.Spec.ZoneConfigs {
+		if ptr.Deref(c.Spec.ZoneConfigs[i].Zone, "") == zoneName {
+			return &c.Spec.ZoneConfigs[i]
 		}
 	}
 

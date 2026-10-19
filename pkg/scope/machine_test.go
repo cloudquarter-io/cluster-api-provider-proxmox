@@ -29,6 +29,8 @@ import (
 
 	infrav1 "github.com/ionos-cloud/cluster-api-provider-proxmox/api/v1alpha2"
 	"github.com/ionos-cloud/cluster-api-provider-proxmox/pkg/kubernetes/ipam"
+	capmox "github.com/ionos-cloud/cluster-api-provider-proxmox/pkg/proxmox"
+	"github.com/ionos-cloud/cluster-api-provider-proxmox/pkg/proxmox/proxmoxtest"
 )
 
 func TestNewMachineScope_MissingParams(t *testing.T) {
@@ -304,4 +306,239 @@ func TestMachineScope_GetBootstrapSecret(t *testing.T) {
 	bootstrapSecret := corev1.Secret{}
 	require.NoErrorf(t, scope.GetBootstrapSecret(context.Background(), &bootstrapSecret), "")
 	require.Equal(t, secret.GetName(), bootstrapSecret.GetName())
+}
+
+func TestMachineScope_ZoneCloneInputs(t *testing.T) {
+	cluster := &infrav1.ProxmoxCluster{
+		Spec: infrav1.ProxmoxClusterSpec{
+			ZoneConfigs: []infrav1.ZoneConfigSpec{
+				{
+					Zone:           new("zone-a"),
+					Nodes:          []string{"pve-a1"},
+					TemplateSource: &infrav1.TemplateSource{SourceNode: new("pve-a1"), TemplateID: new(int32(9000))},
+					Storage:        new("ceph-a"),
+					NetworkDevices: []infrav1.ZoneNetworkDevice{
+						{Name: "net0", Bridge: new("vmbr-a"), VLAN: new(int32(110))},
+					},
+				},
+				{
+					Zone: new("zone-b"),
+					// Declares none of the clone inputs.
+				},
+			},
+		},
+	}
+	machine := func() *infrav1.ProxmoxMachine {
+		return &infrav1.ProxmoxMachine{
+			Spec: infrav1.ProxmoxMachineSpec{
+				VirtualMachineCloneSpec: infrav1.VirtualMachineCloneSpec{
+					TemplateSource: infrav1.TemplateSource{SourceNode: new("pve1"), TemplateID: new(int32(123))},
+					Storage:        new("local"),
+				},
+				Network: &infrav1.NetworkSpec{
+					NetworkDevices: []infrav1.NetworkDevice{
+						{Name: "net0", Bridge: new("vmbr0"), Model: new("virtio"), MTU: new(int32(1500)), VLAN: new(int32(100)), Queues: new(int32(4))},
+						{Name: "net1", Bridge: new("vmbr1")},
+					},
+				},
+			},
+		}
+	}
+	newScope := func(failureDomain string, proxmoxMachine *infrav1.ProxmoxMachine) *MachineScope {
+		scope := &MachineScope{
+			Machine:        &clusterv1.Machine{Spec: clusterv1.MachineSpec{FailureDomain: failureDomain}},
+			InfraCluster:   &ClusterScope{ProxmoxCluster: cluster},
+			ProxmoxMachine: proxmoxMachine,
+		}
+		require.NoError(t, scope.resolvePlacement())
+		return scope
+	}
+
+	t.Run("no zone reads the machine's inputs", func(t *testing.T) {
+		scope := newScope("", machine())
+		require.Equal(t, int32(123), scope.TemplateID())
+		require.Equal(t, "pve1", scope.SourceNode())
+		require.Equal(t, "local", *scope.Storage())
+		require.Equal(t, machine().Spec.Network.NetworkDevices, scope.NetworkDevices())
+	})
+
+	t.Run("a zone without inputs reads the machine's", func(t *testing.T) {
+		scope := newScope("zone-b", machine())
+		require.Equal(t, int32(123), scope.TemplateID())
+		require.Equal(t, "local", *scope.Storage())
+		require.Equal(t, machine().Spec.Network.NetworkDevices, scope.NetworkDevices())
+	})
+
+	t.Run("the zone's template and storage replace the machine's", func(t *testing.T) {
+		scope := newScope("zone-a", machine())
+		require.Equal(t, int32(9000), scope.TemplateID())
+		require.Equal(t, "pve-a1", scope.SourceNode())
+		require.Nil(t, scope.TemplateSelectorTags())
+		require.Equal(t, infrav1.TemplateMatchPolicyExact, scope.TemplateMatchPolicy())
+		require.Equal(t, "ceph-a", *scope.Storage())
+	})
+
+	t.Run("a zone selector replaces a machine vmid", func(t *testing.T) {
+		selectorCluster := cluster.DeepCopy()
+		selectorCluster.Spec.ZoneConfigs[0].TemplateSource = &infrav1.TemplateSource{
+			TemplateSelector: &infrav1.TemplateSelector{MatchTags: []string{"zone-a"}, MatchPolicy: infrav1.TemplateMatchPolicyBest},
+		}
+		scope := &MachineScope{
+			Machine:        &clusterv1.Machine{Spec: clusterv1.MachineSpec{FailureDomain: "zone-a"}},
+			InfraCluster:   &ClusterScope{ProxmoxCluster: selectorCluster},
+			ProxmoxMachine: machine(),
+		}
+		require.NoError(t, scope.resolvePlacement())
+		require.Equal(t, int32(-1), scope.TemplateID())
+		require.Equal(t, "", scope.SourceNode())
+		require.Equal(t, []string{"zone-a"}, scope.TemplateSelectorTags())
+		require.Equal(t, infrav1.TemplateMatchPolicyBest, scope.TemplateMatchPolicy())
+	})
+
+	t.Run("the zone's devices override by name and keep the rest", func(t *testing.T) {
+		scope := newScope("zone-a", machine())
+		require.NoError(t, scope.validateZoneDevices())
+		devices := scope.NetworkDevices()
+		require.Len(t, devices, 2)
+		// net0: bridge and vlan from the zone, model, mtu and queues kept.
+		require.Equal(t, infrav1.NetName("net0"), devices[0].Name)
+		require.Equal(t, "vmbr-a", *devices[0].Bridge)
+		require.Equal(t, int32(110), *devices[0].VLAN)
+		require.Equal(t, "virtio", *devices[0].Model)
+		require.Equal(t, int32(1500), *devices[0].MTU)
+		require.Equal(t, int32(4), *devices[0].Queues)
+		// net1 untouched.
+		require.Equal(t, "vmbr1", *devices[1].Bridge)
+		require.Nil(t, devices[1].VLAN)
+		// The machine's own spec is not rewritten.
+		require.Equal(t, "vmbr0", *scope.ProxmoxMachine.Spec.Network.NetworkDevices[0].Bridge)
+	})
+
+	t.Run("a nameless zone device overrides net0", func(t *testing.T) {
+		nameless := cluster.DeepCopy()
+		nameless.Spec.ZoneConfigs[0].NetworkDevices = []infrav1.ZoneNetworkDevice{{VLAN: new(int32(120))}}
+		scope := &MachineScope{
+			Machine:        &clusterv1.Machine{Spec: clusterv1.MachineSpec{FailureDomain: "zone-a"}},
+			InfraCluster:   &ClusterScope{ProxmoxCluster: nameless},
+			ProxmoxMachine: machine(),
+		}
+		require.NoError(t, scope.resolvePlacement())
+		require.NoError(t, scope.validateZoneDevices())
+		devices := scope.NetworkDevices()
+		require.Len(t, devices, 2)
+		require.Equal(t, int32(120), *devices[0].VLAN)
+		require.Equal(t, "vmbr0", *devices[0].Bridge)
+	})
+
+	t.Run("an override naming a device the machine does not declare is refused", func(t *testing.T) {
+		extra := cluster.DeepCopy()
+		extra.Spec.ZoneConfigs[0].NetworkDevices = []infrav1.ZoneNetworkDevice{{Name: "net9", Bridge: new("vmbr-extra")}}
+		scope := &MachineScope{
+			Machine:        &clusterv1.Machine{Spec: clusterv1.MachineSpec{FailureDomain: "zone-a"}},
+			InfraCluster:   &ClusterScope{ProxmoxCluster: extra},
+			ProxmoxMachine: machine(),
+		}
+		require.NoError(t, scope.resolvePlacement())
+		err := scope.validateZoneDevices()
+		require.Error(t, err)
+		require.Contains(t, err.Error(), `"net9"`)
+		require.Contains(t, err.Error(), `zone "zone-a"`)
+	})
+
+	t.Run("a machine without a network has no devices and cannot be overridden", func(t *testing.T) {
+		noNetwork := machine()
+		noNetwork.Spec.Network = nil
+		scope := newScope("zone-a", noNetwork)
+		require.Nil(t, scope.NetworkDevices())
+		require.Error(t, scope.validateZoneDevices())
+		// A zone without device overrides asks nothing of it.
+		require.NoError(t, newScope("zone-b", noNetwork).validateZoneDevices())
+	})
+}
+
+func TestNewMachineScope_ZoneClient(t *testing.T) {
+	k8sClient := getFakeClient(t)
+	defaultClient := proxmoxtest.NewMockClient(t)
+	zoneClient := proxmoxtest.NewMockClient(t)
+
+	cluster := &infrav1.ProxmoxCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "proxmoxcluster", Namespace: "default"},
+		Spec: infrav1.ProxmoxClusterSpec{
+			ZoneConfigs: []infrav1.ZoneConfigSpec{
+				{Zone: new("dc-a"), CredentialsRef: &corev1.SecretReference{Name: "pve-a"}},
+			},
+		},
+	}
+	infraCluster := &ClusterScope{
+		client:         k8sClient,
+		ProxmoxCluster: cluster,
+		ProxmoxClient:  defaultClient,
+		newClient: func(_ context.Context, ref *corev1.SecretReference) (capmox.Client, error) {
+			require.Equal(t, "pve-a", ref.Name)
+			return zoneClient, nil
+		},
+	}
+	newScope := func(failureDomain string) (*MachineScope, error) {
+		return NewMachineScope(MachineScopeParams{
+			Client:         k8sClient,
+			Cluster:        &clusterv1.Cluster{},
+			Machine:        &clusterv1.Machine{Spec: clusterv1.MachineSpec{FailureDomain: failureDomain}},
+			InfraCluster:   infraCluster,
+			ProxmoxMachine: &infrav1.ProxmoxMachine{ObjectMeta: metav1.ObjectMeta{Name: "machine", Namespace: "default"}},
+			IPAMHelper:     &ipam.Helper{},
+		})
+	}
+
+	t.Run("a machine in a credentialed zone gets the zone's client", func(t *testing.T) {
+		scope, err := newScope("dc-a")
+		require.NoError(t, err)
+		require.Same(t, zoneClient, scope.ProxmoxClient())
+	})
+
+	t.Run("a machine in no zone gets the ProxmoxCluster's client", func(t *testing.T) {
+		scope, err := newScope("")
+		require.NoError(t, err)
+		require.Same(t, defaultClient, scope.ProxmoxClient())
+	})
+
+	t.Run("a machine in an undeclared zone gets no scope at all", func(t *testing.T) {
+		_, err := newScope("gone")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), `zone "gone" is not declared`)
+	})
+
+	t.Run("a machine naming the default zone on its network gets the ProxmoxCluster's client", func(t *testing.T) {
+		scope, err := NewMachineScope(MachineScopeParams{
+			Client:       k8sClient,
+			Cluster:      &clusterv1.Cluster{},
+			Machine:      &clusterv1.Machine{},
+			InfraCluster: infraCluster,
+			ProxmoxMachine: &infrav1.ProxmoxMachine{
+				ObjectMeta: metav1.ObjectMeta{Name: "machine", Namespace: "default"},
+				Spec:       infrav1.ProxmoxMachineSpec{Network: &infrav1.NetworkSpec{Zone: new(infrav1.DefaultZone)}},
+			},
+			IPAMHelper: &ipam.Helper{},
+		})
+		require.NoError(t, err)
+		require.Same(t, defaultClient, scope.ProxmoxClient())
+	})
+
+	t.Run("a zone device override the machine cannot take still yields a scope", func(t *testing.T) {
+		withOverride := cluster.DeepCopy()
+		withOverride.Spec.ZoneConfigs[0].NetworkDevices = []infrav1.ZoneNetworkDevice{{Name: "net9", Bridge: new("vmbr-extra")}}
+		scope, err := NewMachineScope(MachineScopeParams{
+			Client:         k8sClient,
+			Cluster:        &clusterv1.Cluster{},
+			Machine:        &clusterv1.Machine{Spec: clusterv1.MachineSpec{FailureDomain: "dc-a"}},
+			InfraCluster:   &ClusterScope{client: k8sClient, ProxmoxCluster: withOverride, ProxmoxClient: defaultClient, newClient: infraCluster.newClient},
+			ProxmoxMachine: &infrav1.ProxmoxMachine{ObjectMeta: metav1.ObjectMeta{Name: "machine", Namespace: "default"}},
+			IPAMHelper:     &ipam.Helper{},
+		})
+		// Deletion must still reach the zone's endpoint; only provisioning
+		// stops on the recorded error.
+		require.NoError(t, err)
+		require.Same(t, zoneClient, scope.ProxmoxClient())
+		require.Error(t, scope.ZoneDevicesError())
+		require.Contains(t, scope.ZoneDevicesError().Error(), `"net9"`)
+	})
 }

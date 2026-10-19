@@ -249,6 +249,27 @@ func TestGetZoneNodes(t *testing.T) {
 	require.Nil(t, nodes)
 }
 
+func TestGetZoneConfig(t *testing.T) {
+	cl := &ProxmoxCluster{
+		Spec: ProxmoxClusterSpec{
+			ZoneConfigs: []ZoneConfigSpec{
+				{Zone: new("zone-a"), Storage: new("ceph-a")},
+				{Zone: new("zone-b")},
+			},
+		},
+	}
+
+	zc := cl.GetZoneConfig("zone-a")
+	require.NotNil(t, zc)
+	require.Equal(t, "ceph-a", *zc.Storage)
+	// The pointer addresses the spec's own entry, not a copy.
+	require.Same(t, &cl.Spec.ZoneConfigs[0], zc)
+
+	require.NotNil(t, cl.GetZoneConfig("zone-b"))
+	require.Nil(t, cl.GetZoneConfig("zone-c"))
+	require.Nil(t, (&ProxmoxCluster{}).GetZoneConfig("anything"))
+}
+
 func TestSetInClusterIPPoolRef(t *testing.T) {
 	cl := defaultCluster()
 
