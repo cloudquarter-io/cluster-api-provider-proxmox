@@ -199,6 +199,9 @@ func getBootstrapData(ctx context.Context, scope *scope.MachineScope) ([]byte, *
 func getNetworkConfigData(ctx context.Context, machineScope *scope.MachineScope) ([]network.ConfigData, error) {
 	// provide a default in case network is not defined
 	networkSpec := ptr.Deref(machineScope.ProxmoxMachine.Spec.Network, infrav1.NetworkSpec{})
+	// The devices as the zone overrides them, so the guest's network
+	// configuration matches the devices the VM was given.
+	networkSpec.NetworkDevices = machineScope.NetworkDevices()
 	networkConfigData := make([]network.ConfigData, 0, len(networkSpec.NetworkDevices)+len(networkSpec.VRFs))
 
 	networkConfig, err := getNetworkDevices(ctx, machineScope, networkSpec)

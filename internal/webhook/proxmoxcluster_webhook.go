@@ -79,6 +79,11 @@ func (*ProxmoxCluster) ValidateCreate(_ context.Context, obj runtime.Object) (wa
 		return warnings, err
 	}
 
+	if err := validateZoneConfigs(&cluster.Spec, cluster.GroupVersionKind().GroupKind(), cluster.GetName()); err != nil {
+		warnings = append(warnings, fmt.Sprintf("cannot create proxmox cluster %s", cluster.GetName()))
+		return warnings, err
+	}
+
 	return warnings, nil
 }
 
@@ -99,7 +104,29 @@ func (*ProxmoxCluster) ValidateUpdate(_ context.Context, _ runtime.Object, newOb
 		return warnings, err
 	}
 
+	if err := validateZoneConfigs(&newCluster.Spec, newCluster.GroupVersionKind().GroupKind(), newCluster.GetName()); err != nil {
+		warnings = append(warnings, fmt.Sprintf("cannot update proxmox cluster %s", newCluster.GetName()))
+		return warnings, err
+	}
+
 	return warnings, nil
+}
+
+// validateZoneConfigs refuses what the CRD schema cannot express about the
+// zones: a credentialsRef that names no Secret. Zone names are unique by
+// construction, the schema keys the list by zone.
+func validateZoneConfigs(spec *infrav1.ProxmoxClusterSpec, gk schema.GroupKind, name string) error {
+	var allErrs field.ErrorList
+	for i, zc := range spec.ZoneConfigs {
+		if zc.CredentialsRef != nil && zc.CredentialsRef.Name == "" {
+			allErrs = append(allErrs, field.Required(field.NewPath("spec", "zoneConfig").Index(i).Child("credentialsRef", "name"),
+				"a zone credentialsRef must name the Secret holding the zone's Proxmox credentials"))
+		}
+	}
+	if len(allErrs) == 0 {
+		return nil
+	}
+	return apierrors.NewInvalid(gk, name, allErrs)
 }
 
 func validateControlPlaneEndpoint(spec *infrav1.ProxmoxClusterSpec, gk schema.GroupKind, name string) error {

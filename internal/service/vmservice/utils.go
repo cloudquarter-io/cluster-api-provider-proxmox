@@ -163,7 +163,7 @@ func shouldUpdateNetworkDevices(machineScope *scope.MachineScope) bool {
 
 	nets := machineScope.VirtualMachine.VirtualMachineConfig.Nets
 
-	devices := machineScope.ProxmoxMachine.Spec.Network.NetworkDevices
+	devices := machineScope.NetworkDevices()
 	for _, v := range devices {
 		name := v.Name
 		if len(name) == 0 {

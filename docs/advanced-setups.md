@@ -326,6 +326,58 @@ spec:
 |-------|------|---------|-------------|
 | `nodes` | `[]string` | — | Proxmox nodes belonging to this zone. VMs assigned to this failure domain are scheduled only on these nodes. |
 | `controlPlaneEligible` | `*bool` | `true` | Whether control plane machines may be placed in this zone. Set to `false` for worker-only zones. |
+| `credentialsRef` | `SecretReference` | the cluster's client | Credentials of the Proxmox cluster backing this zone, in the shape of the ProxmoxCluster's `credentialsRef`. Machines placed in the zone are cloned, configured and deleted through that endpoint. |
+| `templateSource` | `TemplateSource` | the machine's | The template the zone's machines are cloned from (`sourceNode` + `templateID`, or `templateSelector`), replacing the ProxmoxMachine's. |
+| `storage` | `string` | the machine's | Target storage of the full clone for the zone's machines. |
+| `networkDevices` | `[]NetworkDevice` | the machine's | Per device name, overrides the `bridge`, `model`, `mtu`, `vlan` and `queues` of the ProxmoxMachine's device of the same name; a device the machine does not declare is added. Addressing stays the machine's and the zone's IP config. |
+
+### One Proxmox cluster per zone
+
+A zone may be backed by its own Proxmox cluster: give it a `credentialsRef`,
+the template it holds, its storage and the bridge and VLAN its machines attach
+to. A ProxmoxCluster whose zones all carry a `credentialsRef` needs no
+`credentialsRef` of its own.
+
+```yaml
+  zoneConfig:
+    - zone: "dc-a"
+      nodes: ["pve-a1", "pve-a2"]
+      credentialsRef:
+        name: pve-a-credentials
+      templateSource:
+        sourceNode: pve-a1
+        templateID: 9000
+      storage: ceph-a
+      networkDevices:
+        - name: net0
+          bridge: vmbr1
+          vlan: 110
+      ipv4Config:
+        addresses: ["10.0.1.10-10.0.1.30"]
+        prefix: 24
+        gateway: "10.0.1.1"
+      dnsServers: ["10.0.1.1"]
+    - zone: "dc-b"
+      nodes: ["pve-b1", "pve-b2"]
+      credentialsRef:
+        name: pve-b-credentials
+      templateSource:
+        sourceNode: pve-b1
+        templateID: 9000
+      storage: ceph-b
+      networkDevices:
+        - name: net0
+          bridge: vmbr1
+          vlan: 120
+      ipv4Config:
+        addresses: ["10.0.2.10-10.0.2.30"]
+        prefix: 24
+        gateway: "10.0.2.1"
+      dnsServers: ["10.0.2.1"]
+```
+
+Do not remove a zone that still has machines: a machine whose zone is gone
+is reached through the ProxmoxCluster's client, which does not know the VM.
 
 ### How it works
 
@@ -362,8 +414,6 @@ without zones continue to work exactly as before.
 
 ### Limitations
 
-- Failure domains operate within a single Proxmox cluster (single API endpoint).
-  For multi-datacenter deployments spanning separate Proxmox clusters, see [#370](https://github.com/ionos-cloud/cluster-api-provider-proxmox/issues/370).
 - Zones without a `nodes` list appear as failure domains but do not restrict VM placement
   to specific Proxmox nodes. The IPAM pool selection still works per-zone.
 

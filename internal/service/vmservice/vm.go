@@ -155,14 +155,14 @@ func checkCloudInitStatus(ctx context.Context, machineScope *scope.MachineScope)
 	}
 
 	if !machineScope.SkipQemuGuestCheck() {
-		if err := machineScope.InfraCluster.ProxmoxClient.QemuAgentStatus(ctx, machineScope.VirtualMachine); err != nil {
+		if err := machineScope.ProxmoxClient().QemuAgentStatus(ctx, machineScope.VirtualMachine); err != nil {
 			return true, errors.Wrap(err, "error waiting for agent")
 		}
 	}
 
 	// TODO: Is there a status for Ignition?
 	if !machineScope.SkipCloudInitCheck() {
-		if running, err := machineScope.InfraCluster.ProxmoxClient.CloudInitStatus(ctx, machineScope.VirtualMachine); err != nil || running {
+		if running, err := machineScope.ProxmoxClient().CloudInitStatus(ctx, machineScope.VirtualMachine); err != nil || running {
 			if running {
 				return true, nil
 			}
@@ -284,7 +284,7 @@ func reconcileDisks(ctx context.Context, machineScope *scope.MachineScope) error
 		}
 
 		if bv := disks.BootVolume; bv != nil {
-			if _, err := machineScope.InfraCluster.ProxmoxClient.ResizeDisk(ctx, vm, bv.Disk, bv.FormatSize()); err != nil {
+			if _, err := machineScope.ProxmoxClient().ResizeDisk(ctx, vm, bv.Disk, bv.FormatSize()); err != nil {
 				machineScope.Error(err, "unable to set disk size", "vm", machineScope.VirtualMachine.VMID)
 				return err
 			}
@@ -337,7 +337,7 @@ func reconcileVirtualMachineConfig(ctx context.Context, machineScope *scope.Mach
 
 	// Network vmbrs.
 	if machineScope.ProxmoxMachine.Spec.Network != nil && shouldUpdateNetworkDevices(machineScope) {
-		devices := machineScope.ProxmoxMachine.Spec.Network.NetworkDevices
+		devices := machineScope.NetworkDevices()
 		for _, v := range devices {
 			vmOptions = append(vmOptions, proxmox.VirtualMachineOption{
 				Name:  string(v.Name),
@@ -366,7 +366,7 @@ func reconcileVirtualMachineConfig(ctx context.Context, machineScope *scope.Mach
 
 	machineScope.V(4).Info("reconciling virtual machine config")
 
-	task, err := machineScope.InfraCluster.ProxmoxClient.ConfigureVM(ctx, machineScope.VirtualMachine, vmOptions...)
+	task, err := machineScope.ProxmoxClient().ConfigureVM(ctx, machineScope.VirtualMachine, vmOptions...)
 	if err != nil {
 		return false, errors.Wrapf(err, "failed to configure VM %s", machineScope.Name())
 	}
@@ -454,7 +454,7 @@ func createVM(ctx context.Context, scope *scope.MachineScope) (proxmox.VMCloneRe
 	}
 
 	options := proxmox.VMCloneRequest{
-		Node:  scope.ProxmoxMachine.GetSourceNode(),
+		Node:  scope.SourceNode(),
 		NewID: int(vmid),
 		Name:  scope.ProxmoxMachine.GetName(),
 	}
@@ -472,8 +472,8 @@ func createVM(ctx context.Context, scope *scope.MachineScope) (proxmox.VMCloneRe
 	if scope.ProxmoxMachine.Spec.SnapName != nil {
 		options.SnapName = *scope.ProxmoxMachine.Spec.SnapName
 	}
-	if scope.ProxmoxMachine.Spec.Storage != nil {
-		options.Storage = *scope.ProxmoxMachine.Spec.Storage
+	if storage := scope.Storage(); storage != nil {
+		options.Storage = *storage
 	}
 
 	if scope.InfraCluster.ProxmoxCluster.Status.NodeLocations == nil {
@@ -496,12 +496,12 @@ func createVM(ctx context.Context, scope *scope.MachineScope) (proxmox.VMCloneRe
 		}
 	}
 
-	templateID := scope.ProxmoxMachine.GetTemplateID()
+	templateID := scope.TemplateID()
 	if templateID == -1 {
 		var err error
-		templateSelectorTags := scope.ProxmoxMachine.GetTemplateSelectorTags()
-		templateMatchPolicy := string(scope.ProxmoxMachine.GetTemplateMatchPolicy())
-		options.Node, templateID, err = scope.InfraCluster.ProxmoxClient.FindVMTemplateByTags(ctx, templateSelectorTags, templateMatchPolicy)
+		templateSelectorTags := scope.TemplateSelectorTags()
+		templateMatchPolicy := string(scope.TemplateMatchPolicy())
+		options.Node, templateID, err = scope.ProxmoxClient().FindVMTemplateByTags(ctx, templateSelectorTags, templateMatchPolicy)
 
 		if err != nil {
 			if errors.Is(err, goproxmox.ErrTemplateNotFound) {
@@ -515,7 +515,7 @@ func createVM(ctx context.Context, scope *scope.MachineScope) (proxmox.VMCloneRe
 			return proxmox.VMCloneResponse{}, err
 		}
 	}
-	res, err := scope.InfraCluster.ProxmoxClient.CloneVM(ctx, int(templateID), options)
+	res, err := scope.ProxmoxClient().CloneVM(ctx, int(templateID), options)
 	if err != nil {
 		return res, err
 	}
@@ -560,7 +560,7 @@ func getNextFreeVMIDfromRange(ctx context.Context, scope *scope.MachineScope, vm
 		if slices.Contains(usedVMIDs, i) {
 			continue
 		}
-		if vmidFree, err := scope.InfraCluster.ProxmoxClient.CheckID(ctx, i); err == nil && vmidFree {
+		if vmidFree, err := scope.ProxmoxClient().CheckID(ctx, i); err == nil && vmidFree {
 			return i, nil
 		} else if err != nil {
 			return 0, err
@@ -588,5 +588,5 @@ func getUsedVMIDs(ctx context.Context, scope *scope.MachineScope) ([]int64, erro
 var selectNextNode = scheduler.ScheduleVM
 
 func unmountCloudInitISO(ctx context.Context, machineScope *scope.MachineScope) error {
-	return machineScope.InfraCluster.ProxmoxClient.UnmountCloudInitISO(ctx, machineScope.VirtualMachine, inject.CloudInitISODevice)
+	return machineScope.ProxmoxClient().UnmountCloudInitISO(ctx, machineScope.VirtualMachine, inject.CloudInitISODevice)
 }

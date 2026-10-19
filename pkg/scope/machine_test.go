@@ -305,3 +305,139 @@ func TestMachineScope_GetBootstrapSecret(t *testing.T) {
 	require.NoErrorf(t, scope.GetBootstrapSecret(context.Background(), &bootstrapSecret), "")
 	require.Equal(t, secret.GetName(), bootstrapSecret.GetName())
 }
+
+func TestMachineScope_ZoneCloneInputs(t *testing.T) {
+	cluster := &infrav1.ProxmoxCluster{
+		Spec: infrav1.ProxmoxClusterSpec{
+			ZoneConfigs: []infrav1.ZoneConfigSpec{
+				{
+					Zone:           new("zone-a"),
+					Nodes:          []string{"pve-a1"},
+					TemplateSource: &infrav1.TemplateSource{SourceNode: new("pve-a1"), TemplateID: new(int32(9000))},
+					Storage:        new("ceph-a"),
+					NetworkDevices: []infrav1.NetworkDevice{
+						{Name: "net0", Bridge: new("vmbr-a"), VLAN: new(int32(110))},
+						{Name: "net9", Bridge: new("vmbr-extra")},
+					},
+				},
+				{
+					Zone: new("zone-b"),
+					// Declares none of the clone inputs.
+				},
+			},
+		},
+	}
+	machine := func() *infrav1.ProxmoxMachine {
+		return &infrav1.ProxmoxMachine{
+			Spec: infrav1.ProxmoxMachineSpec{
+				VirtualMachineCloneSpec: infrav1.VirtualMachineCloneSpec{
+					TemplateSource: infrav1.TemplateSource{SourceNode: new("pve1"), TemplateID: new(int32(123))},
+					Storage:        new("local"),
+				},
+				Network: &infrav1.NetworkSpec{
+					NetworkDevices: []infrav1.NetworkDevice{
+						{Name: "net0", Bridge: new("vmbr0"), Model: new("virtio"), MTU: new(int32(1500)), VLAN: new(int32(100)), Queues: new(int32(4))},
+						{Name: "net1", Bridge: new("vmbr1")},
+					},
+				},
+			},
+		}
+	}
+	newScope := func(failureDomain string, proxmoxMachine *infrav1.ProxmoxMachine) *MachineScope {
+		scope := &MachineScope{
+			Machine:        &clusterv1.Machine{Spec: clusterv1.MachineSpec{FailureDomain: failureDomain}},
+			InfraCluster:   &ClusterScope{ProxmoxCluster: cluster},
+			ProxmoxMachine: proxmoxMachine,
+		}
+		require.NoError(t, scope.resolvePlacement())
+		return scope
+	}
+
+	t.Run("no zone reads the machine's inputs", func(t *testing.T) {
+		scope := newScope("", machine())
+		require.Equal(t, int32(123), scope.TemplateID())
+		require.Equal(t, "pve1", scope.SourceNode())
+		require.Equal(t, "local", *scope.Storage())
+		require.Equal(t, machine().Spec.Network.NetworkDevices, scope.NetworkDevices())
+	})
+
+	t.Run("a zone without inputs reads the machine's", func(t *testing.T) {
+		scope := newScope("zone-b", machine())
+		require.Equal(t, int32(123), scope.TemplateID())
+		require.Equal(t, "local", *scope.Storage())
+		require.Equal(t, machine().Spec.Network.NetworkDevices, scope.NetworkDevices())
+	})
+
+	t.Run("the zone's template and storage replace the machine's", func(t *testing.T) {
+		scope := newScope("zone-a", machine())
+		require.Equal(t, int32(9000), scope.TemplateID())
+		require.Equal(t, "pve-a1", scope.SourceNode())
+		require.Nil(t, scope.TemplateSelectorTags())
+		require.Equal(t, infrav1.TemplateMatchPolicyExact, scope.TemplateMatchPolicy())
+		require.Equal(t, "ceph-a", *scope.Storage())
+	})
+
+	t.Run("a zone selector replaces a machine vmid", func(t *testing.T) {
+		selectorCluster := cluster.DeepCopy()
+		selectorCluster.Spec.ZoneConfigs[0].TemplateSource = &infrav1.TemplateSource{
+			TemplateSelector: &infrav1.TemplateSelector{MatchTags: []string{"zone-a"}, MatchPolicy: infrav1.TemplateMatchPolicyBest},
+		}
+		scope := &MachineScope{
+			Machine:        &clusterv1.Machine{Spec: clusterv1.MachineSpec{FailureDomain: "zone-a"}},
+			InfraCluster:   &ClusterScope{ProxmoxCluster: selectorCluster},
+			ProxmoxMachine: machine(),
+		}
+		require.NoError(t, scope.resolvePlacement())
+		require.Equal(t, int32(-1), scope.TemplateID())
+		require.Equal(t, "", scope.SourceNode())
+		require.Equal(t, []string{"zone-a"}, scope.TemplateSelectorTags())
+		require.Equal(t, infrav1.TemplateMatchPolicyBest, scope.TemplateMatchPolicy())
+	})
+
+	t.Run("the zone's devices override by name and keep the rest", func(t *testing.T) {
+		scope := newScope("zone-a", machine())
+		devices := scope.NetworkDevices()
+		require.Len(t, devices, 3)
+		// net0: bridge and vlan from the zone, model, mtu and queues kept.
+		require.Equal(t, infrav1.NetName("net0"), devices[0].Name)
+		require.Equal(t, "vmbr-a", *devices[0].Bridge)
+		require.Equal(t, int32(110), *devices[0].VLAN)
+		require.Equal(t, "virtio", *devices[0].Model)
+		require.Equal(t, int32(1500), *devices[0].MTU)
+		require.Equal(t, int32(4), *devices[0].Queues)
+		// net1 untouched.
+		require.Equal(t, "vmbr1", *devices[1].Bridge)
+		require.Nil(t, devices[1].VLAN)
+		// net9 added from the zone.
+		require.Equal(t, infrav1.NetName("net9"), devices[2].Name)
+		require.Equal(t, "vmbr-extra", *devices[2].Bridge)
+		// The machine's own spec is not rewritten.
+		require.Equal(t, "vmbr0", *scope.ProxmoxMachine.Spec.Network.NetworkDevices[0].Bridge)
+		require.Len(t, scope.ProxmoxMachine.Spec.Network.NetworkDevices, 2)
+	})
+
+	t.Run("a nameless zone device overrides net0", func(t *testing.T) {
+		nameless := cluster.DeepCopy()
+		nameless.Spec.ZoneConfigs[0].NetworkDevices = []infrav1.NetworkDevice{{VLAN: new(int32(120))}}
+		scope := &MachineScope{
+			Machine:        &clusterv1.Machine{Spec: clusterv1.MachineSpec{FailureDomain: "zone-a"}},
+			InfraCluster:   &ClusterScope{ProxmoxCluster: nameless},
+			ProxmoxMachine: machine(),
+		}
+		require.NoError(t, scope.resolvePlacement())
+		devices := scope.NetworkDevices()
+		require.Len(t, devices, 2)
+		require.Equal(t, int32(120), *devices[0].VLAN)
+		require.Equal(t, "vmbr0", *devices[0].Bridge)
+	})
+
+	t.Run("a machine without a network only gets the zone's devices", func(t *testing.T) {
+		noNetwork := machine()
+		noNetwork.Spec.Network = nil
+		scope := newScope("zone-a", noNetwork)
+		devices := scope.NetworkDevices()
+		require.Len(t, devices, 2)
+		require.Equal(t, infrav1.NetName("net0"), devices[0].Name)
+		require.Equal(t, infrav1.NetName("net9"), devices[1].Name)
+	})
+}

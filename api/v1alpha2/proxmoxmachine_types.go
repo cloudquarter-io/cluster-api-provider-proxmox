@@ -700,32 +700,56 @@ func (r *ProxmoxMachine) GetVirtualMachineID() int64 {
 
 // GetTemplateID get the Proxmox template "vmid" used to provision this machine.
 func (r *ProxmoxMachine) GetTemplateID() int32 {
-	if r.Spec.TemplateID != nil {
-		return *r.Spec.TemplateID
-	}
-	return -1
+	return r.Spec.TemplateSource.GetTemplateID()
 }
 
 // GetTemplateSelectorTags get the tags, the desired vm template should have.
 func (r *ProxmoxMachine) GetTemplateSelectorTags() []string {
-	if r.Spec.TemplateSelector != nil {
-		return r.Spec.TemplateSelector.MatchTags
-	}
-	return nil
+	return r.Spec.TemplateSource.GetTemplateSelectorTags()
 }
 
 // GetTemplateMatchPolicy returns the resolution policy for selecting VM templates.
 // If no TemplateSelector or MatchPolicy is set, TemplateMatchPolicyExact is returned.
 func (r *ProxmoxMachine) GetTemplateMatchPolicy() TemplateMatchPolicy {
-	if r.Spec.TemplateSelector != nil && r.Spec.TemplateSelector.MatchPolicy != "" {
-		return r.Spec.TemplateSelector.MatchPolicy
-	}
-	return TemplateMatchPolicyExact
+	return r.Spec.TemplateSource.GetTemplateMatchPolicy()
 }
 
 // GetSourceNode gets the Proxmox node used to clone this machine from.
 func (r *ProxmoxMachine) GetSourceNode() string {
-	return ptr.Deref(r.Spec.SourceNode, "")
+	return r.Spec.TemplateSource.GetSourceNode()
+}
+
+// GetTemplateID returns the template "vmid" this source clones from, or -1
+// when the source selects its template by tags instead.
+func (t TemplateSource) GetTemplateID() int32 {
+	if t.TemplateID != nil {
+		return *t.TemplateID
+	}
+	return -1
+}
+
+// GetTemplateSelectorTags returns the tags the template must carry, or nil
+// when the source names its template by vmid.
+func (t TemplateSource) GetTemplateSelectorTags() []string {
+	if t.TemplateSelector != nil {
+		return t.TemplateSelector.MatchTags
+	}
+	return nil
+}
+
+// GetTemplateMatchPolicy returns the resolution policy for selecting VM
+// templates; TemplateMatchPolicyExact when none is set.
+func (t TemplateSource) GetTemplateMatchPolicy() TemplateMatchPolicy {
+	if t.TemplateSelector != nil && t.TemplateSelector.MatchPolicy != "" {
+		return t.TemplateSelector.MatchPolicy
+	}
+	return TemplateMatchPolicyExact
+}
+
+// GetSourceNode returns the Proxmox node the template is cloned from, or ""
+// when none is named.
+func (t TemplateSource) GetSourceNode() string {
+	return ptr.Deref(t.SourceNode, "")
 }
 
 // FormatSize returns the format required for the Proxmox API.

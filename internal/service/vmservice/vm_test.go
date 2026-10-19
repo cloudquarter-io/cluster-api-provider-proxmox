@@ -203,6 +203,39 @@ func TestEnsureVirtualMachine_CreateVM_FullOptions_TemplateSelector(t *testing.T
 	requireConditionIsFalse(t, machineScope.ProxmoxMachine, infrav1.ProxmoxMachineVirtualMachineProvisionedCondition)
 }
 
+func TestEnsureVirtualMachine_CreateVM_ZoneTemplateAndStorage(t *testing.T) {
+	machineScope, proxmoxClient, _ := setupReconcilerTestWithCondition(t, infrav1.ProxmoxMachineVirtualMachineProvisionedCloningReason,
+		func(machine *clusterv1.Machine, infraCluster *infrav1.ProxmoxCluster, infraMachine *infrav1.ProxmoxMachine) {
+			machine.Spec.FailureDomain = "zone-a"
+			infraMachine.Spec.Storage = new("local")
+			infraCluster.Spec.ZoneConfigs = []infrav1.ZoneConfigSpec{{
+				Zone:           new("zone-a"),
+				Nodes:          []string{"node2"},
+				TemplateSource: &infrav1.TemplateSource{SourceNode: new("node2"), TemplateID: new(int32(456))},
+				Storage:        new("ceph-a"),
+			}}
+		})
+	// The zone's template, source node and storage win over the machine's
+	// (template 123 on node1, storage local); the zone's nodes fence the clone.
+	expectedOptions := proxmox.VMCloneRequest{
+		Node:    "node2",
+		Name:    "test",
+		Full:    true,
+		Storage: "ceph-a",
+		Target:  "node2",
+	}
+	response := proxmox.VMCloneResponse{NewID: 456, Task: newTask()}
+	proxmoxClient.EXPECT().CloneVM(context.Background(), 456, expectedOptions).Return(response, nil).Once()
+	proxmoxClient.EXPECT().GetReservableMemoryBytes(context.Background(), "node2", int64(100)).Return(^uint64(0), nil).Once()
+
+	requeue, err := ensureVirtualMachine(context.Background(), machineScope)
+	require.NoError(t, err)
+	require.True(t, requeue)
+
+	require.Equal(t, "node2", *machineScope.ProxmoxMachine.Status.ProxmoxNode)
+	require.Equal(t, "zone-a", *machineScope.InfraCluster.ProxmoxCluster.Status.NodeLocations.Workers[0].Zone)
+}
+
 func TestEnsureVirtualMachine_CreateVM_FullOptions_TemplateSelector_VMTemplateNotFound(t *testing.T) {
 	ctx := context.Background()
 	vmTemplateTags := []string{"foo", "bar"}
@@ -708,6 +741,39 @@ func TestReconcileVirtualMachineConfigVLAN(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, requeue)
 	require.EqualValues(t, task.UPID, *machineScope.ProxmoxMachine.Status.TaskRef)
+}
+
+func TestReconcileVirtualMachineConfigZoneNetworkDevices(t *testing.T) {
+	machineScope, proxmoxClient, _ := setupReconcilerTestWithCondition(t, infrav1.ProxmoxMachineVirtualMachineProvisionedCloningReason,
+		func(machine *clusterv1.Machine, infraCluster *infrav1.ProxmoxCluster, _ *infrav1.ProxmoxMachine) {
+			machine.Spec.FailureDomain = "zone-a"
+			infraCluster.Spec.ZoneConfigs = []infrav1.ZoneConfigSpec{{
+				Zone:           new("zone-a"),
+				NetworkDevices: []infrav1.NetworkDevice{{Name: infrav1.NetName("net0"), Bridge: new("vmbr-a"), VLAN: new(int32(200))}},
+			}}
+		})
+	machineScope.ProxmoxMachine.Spec.Network = &infrav1.NetworkSpec{
+		NetworkDevices: []infrav1.NetworkDevice{
+			{Name: infrav1.NetName("net0"), Bridge: new("vmbr0"), Model: new("virtio"), VLAN: new(int32(100))},
+			{Name: infrav1.NetName("net1"), Bridge: new("vmbr1"), Model: new("virtio"), VLAN: new(int32(100))},
+		},
+	}
+
+	vm := newStoppedVM()
+	task := newTask()
+	machineScope.SetVirtualMachine(vm)
+	// net0 takes the zone's bridge and VLAN and keeps the machine's model;
+	// net1 is the machine's.
+	expectedOptions := []any{
+		proxmox.VirtualMachineOption{Name: "net0", Value: formatNetworkDevice("virtio", "vmbr-a", nil, new(int32(200)), nil)},
+		proxmox.VirtualMachineOption{Name: "net1", Value: formatNetworkDevice("virtio", "vmbr1", nil, new(int32(100)), nil)},
+	}
+
+	proxmoxClient.EXPECT().ConfigureVM(context.TODO(), vm, expectedOptions...).Return(task, nil).Once()
+
+	requeue, err := reconcileVirtualMachineConfig(context.TODO(), machineScope)
+	require.NoError(t, err)
+	require.True(t, requeue)
 }
 
 func TestReconcileVirtualMachineConfigQueue(t *testing.T) {

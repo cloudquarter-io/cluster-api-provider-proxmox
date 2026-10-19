@@ -161,6 +161,40 @@ type ZoneConfigSpec struct {
 	// placed in this zone. Defaults to true when not set.
 	// +optional
 	ControlPlaneEligible *bool `json:"controlPlaneEligible,omitempty"`
+
+	// credentialsRef is a reference to a Secret holding the credentials of
+	// the Proxmox cluster that backs this zone, in the same shape as the
+	// ProxmoxCluster's own credentialsRef. When set, every machine placed in
+	// this zone is cloned, configured and deleted through that endpoint, so
+	// one CAPI cluster can span physically separate Proxmox clusters. When
+	// unset, the zone shares the ProxmoxCluster's client. If no namespace is
+	// provided, the namespace of the ProxmoxCluster is used.
+	// +optional
+	CredentialsRef *corev1.SecretReference `json:"credentialsRef,omitempty"`
+
+	// templateSource selects the template the machines placed in this zone
+	// are cloned from, in place of the ProxmoxMachine's own templateSource.
+	// A zone backed by its own Proxmox cluster holds its own copy of the
+	// template, which the ProxmoxMachine cannot name.
+	// +optional
+	TemplateSource *TemplateSource `json:"templateSource,omitempty"`
+
+	// storage is the target storage of the full clone for the machines
+	// placed in this zone, in place of the ProxmoxMachine's own storage.
+	// +optional
+	// +kubebuilder:validation:MinLength=1
+	Storage *string `json:"storage,omitempty"`
+
+	// networkDevices overrides, per device name, the bridge, model, mtu,
+	// vlan and queues of the ProxmoxMachine's network device of the same
+	// name for the machines placed in this zone; a device the machine does
+	// not declare is added. Addressing stays the machine's device
+	// configuration and the zone's IP config. This is how a zone attaches
+	// its machines to its own bridge and VLAN.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	NetworkDevices []NetworkDevice `json:"networkDevices,omitempty"`
 }
 
 // IPConfigSpec contains information about available IP config.
@@ -547,9 +581,19 @@ func (c *ProxmoxCluster) addNodeLocation(loc NodeLocation, isControlPlane bool) 
 // GetZoneNodes returns the Proxmox node names for a given zone name.
 // Returns nil if the zone is not found or has no explicit nodes configured.
 func (c *ProxmoxCluster) GetZoneNodes(zoneName string) []string {
-	for _, zc := range c.Spec.ZoneConfigs {
-		if ptr.Deref(zc.Zone, "") == zoneName {
-			return zc.Nodes
+	if zc := c.GetZoneConfig(zoneName); zc != nil {
+		return zc.Nodes
+	}
+
+	return nil
+}
+
+// GetZoneConfig returns the configuration of the named zone, or nil when the
+// ProxmoxCluster declares no such zone.
+func (c *ProxmoxCluster) GetZoneConfig(zoneName string) *ZoneConfigSpec {
+	for i := range c.Spec.ZoneConfigs {
+		if ptr.Deref(c.Spec.ZoneConfigs[i].Zone, "") == zoneName {
+			return &c.Spec.ZoneConfigs[i]
 		}
 	}
 
