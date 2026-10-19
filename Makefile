@@ -236,12 +236,12 @@ crs-metallb: ## Generates crs manifests for MetalLB.
 ## Release
 ## --------------------------------------
 
-# SOURCE_IMAGE is the image name the kustomize base carries
-# (config/default/manager_image_patch.yaml); the release manifest renames it to
-# REPOSITORY:RELEASE_VERSION, the image the container-image workflow publishes
-# for this repository.
-SOURCE_IMAGE ?= ghcr.io/ionos-cloud/cluster-api-provider-proxmox
-REPOSITORY ?= ghcr.io/cloudquarter-io/cluster-api-provider-proxmox
+REPOSITORY ?= ghcr.io/ionos-cloud/cluster-api-provider-proxmox
+# RELEASE_REPOSITORY is the image the release manifest names: the one the
+# container-image workflow publishes for this repository. The kustomize base
+# carries upstream's image name (REPOSITORY, also the e2e image name), which
+# release-manifests renames rather than only re-tags.
+RELEASE_REPOSITORY ?= ghcr.io/cloudquarter-io/cluster-api-provider-proxmox
 RELEASE_DIR ?= out
 RELEASE_VERSION ?= v0.0.1
 
@@ -251,7 +251,7 @@ release-manifests: ## Create kustomized release manifest in $RELEASE_DIR (defaul
 	@mkdir -p $(RELEASE_DIR)
 	cp metadata.yaml $(RELEASE_DIR)/metadata.yaml
 	## point the manager at the released image: the base's image name is renamed, not only re-tagged
-	cd $(RELEASE_MANIFEST_SOURCE_BASE) && go tool kustomize edit set image $(SOURCE_IMAGE)=$(REPOSITORY):$(RELEASE_VERSION)
+	cd $(RELEASE_MANIFEST_SOURCE_BASE) && go tool kustomize edit set image $(REPOSITORY)=$(RELEASE_REPOSITORY):$(RELEASE_VERSION)
 	## generate the release manifest
 	go tool kustomize build $(RELEASE_MANIFEST_SOURCE_BASE) > $(RELEASE_DIR)/infrastructure-components.yaml
 

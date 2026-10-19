@@ -24,14 +24,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Set env
+        env:
+          DRY_RUN_VERSION: ${{ inputs.version }}
         run: |
           if [ "${{ github.event_name }}" = "push" ]; then
             echo "RELEASE_TAG=${GITHUB_REF##refs/tags/}" >> "$GITHUB_ENV"
           else
-            echo "RELEASE_TAG=${{ inputs.version }}" >> "$GITHUB_ENV"
+            echo "RELEASE_TAG=${DRY_RUN_VERSION}" >> "$GITHUB_ENV"
           fi
           # The image the container-image workflow publishes for this repository.
-          echo "REPOSITORY=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+          echo "RELEASE_REPOSITORY=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
       - name: checkout code
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -42,7 +44,7 @@ jobs:
           go-version-file: go.mod
       - name: generate release artifacts
         run: |
-          make release-manifests "RELEASE_VERSION=$RELEASE_TAG" "REPOSITORY=$REPOSITORY"
+          make release-manifests "RELEASE_VERSION=$RELEASE_TAG" "RELEASE_REPOSITORY=$RELEASE_REPOSITORY"
       - name: generate release templates
         run: |
           make release-templates
@@ -52,8 +54,11 @@ jobs:
           cat out/SHA256SUMS
       - name: verify the manifest references the published image
         run: |
-          grep -q "image: ${REPOSITORY}:${RELEASE_TAG}$" out/infrastructure-components.yaml
-          ! grep -q "ghcr.io/ionos-cloud" out/infrastructure-components.yaml
+          grep -q "image: ${RELEASE_REPOSITORY}:${RELEASE_TAG}$" out/infrastructure-components.yaml
+          if grep -q "ghcr.io/ionos-cloud" out/infrastructure-components.yaml; then
+            echo "the release manifest still references the upstream image" >&2
+            exit 1
+          fi
       - name: keep the assets of a dry run
         if: github.event_name == 'workflow_dispatch'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
