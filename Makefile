@@ -237,6 +237,11 @@ crs-metallb: ## Generates crs manifests for MetalLB.
 ## --------------------------------------
 
 REPOSITORY ?= ghcr.io/ionos-cloud/cluster-api-provider-proxmox
+# RELEASE_REPOSITORY is the image the release manifest names: the one the
+# container-image workflow publishes for this repository. The kustomize base
+# carries upstream's image name (REPOSITORY, also the e2e image name), which
+# release-manifests renames rather than only re-tags.
+RELEASE_REPOSITORY ?= ghcr.io/cloudquarter-io/cluster-api-provider-proxmox
 RELEASE_DIR ?= out
 RELEASE_VERSION ?= v0.0.1
 
@@ -245,8 +250,8 @@ RELEASE_MANIFEST_SOURCE_BASE ?= config/default
 release-manifests: ## Create kustomized release manifest in $RELEASE_DIR (defaults to out).
 	@mkdir -p $(RELEASE_DIR)
 	cp metadata.yaml $(RELEASE_DIR)/metadata.yaml
-	## change the image tag to the release version
-	cd $(RELEASE_MANIFEST_SOURCE_BASE) && go tool kustomize edit set image $(REPOSITORY):$(RELEASE_VERSION)
+	## point the manager at the released image: the base's image name is renamed, not only re-tagged
+	cd $(RELEASE_MANIFEST_SOURCE_BASE) && go tool kustomize edit set image $(REPOSITORY)=$(RELEASE_REPOSITORY):$(RELEASE_VERSION)
 	## generate the release manifest
 	go tool kustomize build $(RELEASE_MANIFEST_SOURCE_BASE) > $(RELEASE_DIR)/infrastructure-components.yaml
 
@@ -254,6 +259,10 @@ release-manifests: ## Create kustomized release manifest in $RELEASE_DIR (defaul
 release-templates: ## Generate release templates
 	@mkdir -p $(RELEASE_DIR)
 	cp templates/cluster-template*.yaml $(RELEASE_DIR)/
+
+.PHONY: release-checksums
+release-checksums: ## Write SHA256SUMS over the release assets in $RELEASE_DIR (what a consumer pins).
+	cd $(RELEASE_DIR) && rm -f SHA256SUMS && sha256sum $$(ls | sort) > SHA256SUMS
 
 
 ##@ e2e
