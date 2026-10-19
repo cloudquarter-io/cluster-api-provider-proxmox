@@ -23,7 +23,6 @@ import (
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	infrav1 "github.com/ionos-cloud/cluster-api-provider-proxmox/api/v1alpha2"
@@ -127,9 +126,9 @@ var _ = Describe("Controller Test", func() {
 			cluster := validProxmoxCluster("test-zone-inputs")
 			zone := zoneConfig("dc-a", "10.10.20.0/24")
 			zone.CredentialsRef = &corev1.SecretReference{Name: "pve-a"}
-			zone.TemplateSource = &infrav1.TemplateSource{SourceNode: ptr.To("pve-a1"), TemplateID: ptr.To(int32(9000))}
-			zone.Storage = ptr.To("ceph-a")
-			zone.NetworkDevices = []infrav1.ZoneNetworkDevice{{Name: "net0", Bridge: ptr.To("vmbr1"), VLAN: ptr.To(int32(110))}}
+			zone.TemplateSource = &infrav1.TemplateSource{SourceNode: new("pve-a1"), TemplateID: new(int32(9000))}
+			zone.Storage = new("ceph-a")
+			zone.NetworkDevices = []infrav1.ZoneNetworkDevice{{Name: "net0", Bridge: new("vmbr1"), VLAN: new(int32(110))}}
 			cluster.Spec.ZoneConfigs = []infrav1.ZoneConfigSpec{zone}
 			g.Expect(k8sClient.Create(testEnv.GetContext(), &cluster)).To(Succeed())
 			g.Expect(client.IgnoreNotFound(k8sClient.Delete(testEnv.GetContext(), &cluster))).To(Succeed())
@@ -214,7 +213,7 @@ func invalidProxmoxCluster(name string) infrav1.ProxmoxCluster {
 // given network and a resolver.
 func zoneConfig(name, cidr string) infrav1.ZoneConfigSpec {
 	return infrav1.ZoneConfigSpec{
-		Zone: ptr.To(name),
+		Zone: new(name),
 		IPv4Config: &infrav1.IPConfigSpec{
 			Addresses: []string{cidr},
 			Prefix:    24,
