@@ -122,7 +122,7 @@ var _ = Describe("Controller Test", func() {
 			zone.CredentialsRef = &corev1.SecretReference{Name: "pve-a"}
 			zone.TemplateSource = &infrav1.TemplateSource{SourceNode: ptr.To("pve-a1"), TemplateID: ptr.To(int32(9000))}
 			zone.Storage = ptr.To("ceph-a")
-			zone.NetworkDevices = []infrav1.NetworkDevice{{Name: "net0", Bridge: ptr.To("vmbr1"), VLAN: ptr.To(int32(110))}}
+			zone.NetworkDevices = []infrav1.ZoneNetworkDevice{{Name: "net0", Bridge: ptr.To("vmbr1"), VLAN: ptr.To(int32(110))}}
 			cluster.Spec.ZoneConfigs = []infrav1.ZoneConfigSpec{zone}
 			g.Expect(k8sClient.Create(testEnv.GetContext(), &cluster)).To(Succeed())
 			g.Expect(client.IgnoreNotFound(k8sClient.Delete(testEnv.GetContext(), &cluster))).To(Succeed())

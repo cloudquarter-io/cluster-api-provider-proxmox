@@ -206,10 +206,10 @@ func TestEnsureVirtualMachine_CreateVM_FullOptions_TemplateSelector(t *testing.T
 func TestEnsureVirtualMachine_CreateVM_ZoneTemplateAndStorage(t *testing.T) {
 	machineScope, proxmoxClient, _ := setupReconcilerTestWithCondition(t, infrav1.ProxmoxMachineVirtualMachineProvisionedCloningReason,
 		func(machine *clusterv1.Machine, infraCluster *infrav1.ProxmoxCluster, infraMachine *infrav1.ProxmoxMachine) {
-			machine.Spec.FailureDomain = "zone-a"
+			machine.Spec.FailureDomain = zoneA
 			infraMachine.Spec.Storage = new("local")
 			infraCluster.Spec.ZoneConfigs = []infrav1.ZoneConfigSpec{{
-				Zone:           new("zone-a"),
+				Zone:           new(zoneA),
 				Nodes:          []string{"node2"},
 				TemplateSource: &infrav1.TemplateSource{SourceNode: new("node2"), TemplateID: new(int32(456))},
 				Storage:        new("ceph-a"),
@@ -233,7 +233,7 @@ func TestEnsureVirtualMachine_CreateVM_ZoneTemplateAndStorage(t *testing.T) {
 	require.True(t, requeue)
 
 	require.Equal(t, "node2", *machineScope.ProxmoxMachine.Status.ProxmoxNode)
-	require.Equal(t, "zone-a", *machineScope.InfraCluster.ProxmoxCluster.Status.NodeLocations.Workers[0].Zone)
+	require.Equal(t, zoneA, *machineScope.InfraCluster.ProxmoxCluster.Status.NodeLocations.Workers[0].Zone)
 }
 
 func TestEnsureVirtualMachine_CreateVM_FullOptions_TemplateSelector_VMTemplateNotFound(t *testing.T) {
@@ -745,19 +745,19 @@ func TestReconcileVirtualMachineConfigVLAN(t *testing.T) {
 
 func TestReconcileVirtualMachineConfigZoneNetworkDevices(t *testing.T) {
 	machineScope, proxmoxClient, _ := setupReconcilerTestWithCondition(t, infrav1.ProxmoxMachineVirtualMachineProvisionedCloningReason,
-		func(machine *clusterv1.Machine, infraCluster *infrav1.ProxmoxCluster, _ *infrav1.ProxmoxMachine) {
-			machine.Spec.FailureDomain = "zone-a"
+		func(machine *clusterv1.Machine, infraCluster *infrav1.ProxmoxCluster, infraMachine *infrav1.ProxmoxMachine) {
+			machine.Spec.FailureDomain = zoneA
 			infraCluster.Spec.ZoneConfigs = []infrav1.ZoneConfigSpec{{
-				Zone:           new("zone-a"),
-				NetworkDevices: []infrav1.NetworkDevice{{Name: infrav1.NetName("net0"), Bridge: new("vmbr-a"), VLAN: new(int32(200))}},
+				Zone:           new(zoneA),
+				NetworkDevices: []infrav1.ZoneNetworkDevice{{Name: infrav1.NetName("net0"), Bridge: new("vmbr-a"), VLAN: new(int32(200))}},
 			}}
+			infraMachine.Spec.Network = &infrav1.NetworkSpec{
+				NetworkDevices: []infrav1.NetworkDevice{
+					{Name: infrav1.NetName("net0"), Bridge: new("vmbr0"), Model: new("virtio"), VLAN: new(int32(100))},
+					{Name: infrav1.NetName("net1"), Bridge: new("vmbr1"), Model: new("virtio"), VLAN: new(int32(100))},
+				},
+			}
 		})
-	machineScope.ProxmoxMachine.Spec.Network = &infrav1.NetworkSpec{
-		NetworkDevices: []infrav1.NetworkDevice{
-			{Name: infrav1.NetName("net0"), Bridge: new("vmbr0"), Model: new("virtio"), VLAN: new(int32(100))},
-			{Name: infrav1.NetName("net1"), Bridge: new("vmbr1"), Model: new("virtio"), VLAN: new(int32(100))},
-		},
-	}
 
 	vm := newStoppedVM()
 	task := newTask()

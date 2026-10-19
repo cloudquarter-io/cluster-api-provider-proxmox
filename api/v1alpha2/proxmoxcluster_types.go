@@ -187,14 +187,54 @@ type ZoneConfigSpec struct {
 
 	// networkDevices overrides, per device name, the bridge, model, mtu,
 	// vlan and queues of the ProxmoxMachine's network device of the same
-	// name for the machines placed in this zone; a device the machine does
-	// not declare is added. Addressing stays the machine's device
-	// configuration and the zone's IP config. This is how a zone attaches
-	// its machines to its own bridge and VLAN.
+	// name for the machines placed in this zone. Every device named here
+	// must be one the machine declares. Addressing stays the machine's
+	// device configuration and the zone's IP config. This is how a zone
+	// attaches its machines to its own bridge and VLAN.
 	// +optional
 	// +listType=map
 	// +listMapKey=name
-	NetworkDevices []NetworkDevice `json:"networkDevices,omitempty"`
+	NetworkDevices []ZoneNetworkDevice `json:"networkDevices,omitempty"`
+}
+
+// ZoneNetworkDevice overrides the device-level settings of one of the
+// ProxmoxMachine's network devices for the machines placed in a zone. It
+// carries no addressing: that stays the machine's device configuration and
+// the zone's IP config.
+type ZoneNetworkDevice struct {
+	// name is the network device this overrides, net0 when not set.
+	// +default="net0"
+	// +optional
+	Name NetName `json:"name,omitempty"`
+
+	// bridge is the network bridge to attach to the machine.
+	// +kubebuilder:validation:MinLength=1
+	// +optional
+	Bridge *string `json:"bridge,omitempty"`
+
+	// model is the network device model.
+	// +optional
+	// +kubebuilder:validation:Enum=e1000;virtio;rtl8139;vmxnet3
+	Model *string `json:"model,omitempty"`
+
+	// mtu is the network device Maximum Transmission Unit.
+	// When set to 1, virtio devices inherit the MTU value from the underlying bridge.
+	// +optional
+	// +kubebuilder:validation:XValidation:rule="self == 1 || (self >= 576 && self <= 65520)",message="invalid MTU value"
+	MTU MTU `json:"mtu,omitempty"`
+
+	// vlan is the network L2 VLAN.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=4094
+	VLAN *int32 `json:"vlan,omitempty"`
+
+	// queues is the number of queues assigned to the device.
+	// This value is passed to the Multiqueue field in PROXMOX.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=65535
+	Queues *int32 `json:"queues,omitempty"`
 }
 
 // IPConfigSpec contains information about available IP config.

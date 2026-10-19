@@ -67,9 +67,9 @@ type ClusterScope struct {
 	ProxmoxClient  capmox.Client
 	controllerName string
 
-	// zoneClients caches the clients built from the zones' own
-	// credentialsRef, keyed by zone name, for the lifetime of the scope.
-	zoneClients map[string]capmox.Client
+	// newClient builds a client from a credentials Secret reference;
+	// newProxmoxClient unless a test injects one.
+	newClient func(ctx context.Context, credentialsRef *corev1.SecretReference) (capmox.Client, error)
 
 	IPAMHelper *ipam.Helper
 }
@@ -156,38 +156,54 @@ func defaultProxmoxClientNeeded(proxmoxCluster *infrav1.ProxmoxCluster) bool {
 	return false
 }
 
+// zonesWithOwnCredentials reports whether any zone of the ProxmoxCluster
+// carries its own credentialsRef: once one does, a machine's endpoint is
+// decided by its zone and an undeclared zone cannot fall back to the
+// ProxmoxCluster's client without risking the wrong Proxmox cluster.
+func zonesWithOwnCredentials(proxmoxCluster *infrav1.ProxmoxCluster) bool {
+	for _, zc := range proxmoxCluster.Spec.ZoneConfigs {
+		if zc.CredentialsRef != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // ProxmoxClientForZone returns the client that reaches the Proxmox cluster
-// backing the named zone: the client built from the zone's own
-// credentialsRef, cached per zone for the lifetime of the scope, or the
-// ProxmoxCluster's client when the zone is empty, unknown or declares no
-// credentials of its own. It fails when that default client is needed and
-// none was configured.
+// backing the named zone: a client built from the zone's own credentialsRef,
+// or the ProxmoxCluster's client when the zone is empty or declares no
+// credentials of its own. It fails when the ProxmoxCluster's client is
+// needed and none was configured, and when the zone is not declared while
+// another zone carries its own credentials: that machine's VM lives on an
+// endpoint the ProxmoxCluster can no longer name, and reaching another one
+// would find, or delete, the wrong VM.
+//
+// The scope lives for one reconcile, so a zone's client is built once per
+// machine reconcile, as the ProxmoxCluster's own client is.
 func (s *ClusterScope) ProxmoxClientForZone(ctx context.Context, zone string) (capmox.Client, error) {
 	zc := s.ProxmoxCluster.GetZoneConfig(zone)
-	if zc == nil || zc.CredentialsRef == nil {
-		if s.ProxmoxClient == nil && !defaultProxmoxClientNeeded(s.ProxmoxCluster) {
-			// The cluster runs without a default client because every zone
-			// reaches its own endpoint, and this machine is in none of them.
-			return nil, errors.Errorf("no ProxmoxClient reaches zone %q: every zone of the ProxmoxCluster carries its own credentialsRef and the machine is placed in none of them", zone)
+	if zc != nil && zc.CredentialsRef != nil {
+		newClient := s.newClient
+		if newClient == nil {
+			newClient = s.newProxmoxClient
 		}
-		return s.ProxmoxClient, nil
-	}
-
-	if pmoxClient, ok := s.zoneClients[zone]; ok {
+		pmoxClient, err := newClient(ctx, zc.CredentialsRef)
+		if err != nil {
+			return nil, errors.Wrapf(err, "unable to initialize ProxmoxClient for zone %q", zone)
+		}
 		return pmoxClient, nil
 	}
 
-	pmoxClient, err := s.newProxmoxClient(ctx, zc.CredentialsRef)
-	if err != nil {
-		return nil, errors.Wrapf(err, "unable to initialize ProxmoxClient for zone %q", zone)
+	if zc == nil && zone != "" && zonesWithOwnCredentials(s.ProxmoxCluster) {
+		return nil, errors.Errorf("zone %q is not declared by the ProxmoxCluster while other zones carry their own credentialsRef: the machine cannot be reached until the zone is declared again", zone)
 	}
 
-	if s.zoneClients == nil {
-		s.zoneClients = make(map[string]capmox.Client)
+	if s.ProxmoxClient == nil && !defaultProxmoxClientNeeded(s.ProxmoxCluster) {
+		// The cluster runs without a default client because every zone
+		// reaches its own endpoint, and this machine is in none of them.
+		return nil, errors.Errorf("no ProxmoxClient reaches zone %q: every zone of the ProxmoxCluster carries its own credentialsRef and the machine is placed in none of them", zone)
 	}
-	s.zoneClients[zone] = pmoxClient
-
-	return pmoxClient, nil
+	return s.ProxmoxClient, nil
 }
 
 // newProxmoxClient builds a client from the credentials Secret the reference

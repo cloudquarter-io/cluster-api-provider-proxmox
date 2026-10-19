@@ -185,8 +185,8 @@ func TestClusterScope_ProxmoxClientForZone(t *testing.T) {
 	}
 	clusterScope := &ClusterScope{client: k8sClient, ProxmoxCluster: proxmoxCluster, ProxmoxClient: defaultClient}
 
-	t.Run("no zone, an unknown zone and a zone without credentials share the default client", func(t *testing.T) {
-		for _, zone := range []string{"", "unknown", "shared"} {
+	t.Run("no zone and a zone without credentials share the default client", func(t *testing.T) {
+		for _, zone := range []string{"", "shared"} {
 			got, err := clusterScope.ProxmoxClientForZone(context.Background(), zone)
 			require.NoError(t, err, zone)
 			require.Same(t, defaultClient, got, zone)
@@ -202,11 +202,32 @@ func TestClusterScope_ProxmoxClientForZone(t *testing.T) {
 		require.Contains(t, cond.Message, "default/pve-a")
 	})
 
-	t.Run("a zone's client is served from the cache once built", func(t *testing.T) {
-		clusterScope.zoneClients = map[string]capmoxClient.Client{"dc-a": zoneClient}
+	t.Run("a zone with credentials gets a client built from them", func(t *testing.T) {
+		var built *corev1.SecretReference
+		clusterScope.newClient = func(_ context.Context, ref *corev1.SecretReference) (capmoxClient.Client, error) {
+			built = ref
+			return zoneClient, nil
+		}
+		defer func() { clusterScope.newClient = nil }()
 		got, err := clusterScope.ProxmoxClientForZone(context.Background(), "dc-a")
 		require.NoError(t, err)
 		require.Same(t, zoneClient, got)
+		require.Equal(t, "pve-a", built.Name)
+	})
+
+	t.Run("an undeclared zone is refused once any zone has its own credentials", func(t *testing.T) {
+		_, err := clusterScope.ProxmoxClientForZone(context.Background(), "gone")
+		require.Error(t, err)
+		require.Contains(t, err.Error(), `zone "gone" is not declared`)
+	})
+
+	t.Run("an undeclared zone shares the default client when no zone has credentials", func(t *testing.T) {
+		sharedOnly := &ClusterScope{ProxmoxClient: defaultClient, ProxmoxCluster: &infrav1.ProxmoxCluster{
+			Spec: infrav1.ProxmoxClusterSpec{ZoneConfigs: []infrav1.ZoneConfigSpec{{Zone: new("shared")}}},
+		}}
+		got, err := sharedOnly.ProxmoxClientForZone(context.Background(), "gone")
+		require.NoError(t, err)
+		require.Same(t, defaultClient, got)
 	})
 
 	t.Run("without a default client a machine outside every credentialed zone is refused", func(t *testing.T) {

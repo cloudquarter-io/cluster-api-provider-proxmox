@@ -652,3 +652,6 @@ func requireConditionIsFalse(t *testing.T, getter conditions.Getter, cond cluste
 	require.Truef(t, conditions.IsFalse(getter, string(cond)),
 		"expected condition to be %q, got %q", cond, corev1.ConditionFalse, conditions.Get(getter, string(cond)).Status)
 }
+
+// zoneA is the failure domain the zone-placement tests put their machine in.
+const zoneA = "zone-a"

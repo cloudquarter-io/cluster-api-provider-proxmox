@@ -293,6 +293,31 @@ var _ = Describe("External Credentials Tests", func() {
 
 			cleanup(proxmoxCluster1, capiCluster1, proxmoxCluster2, capiCluster2, secret)
 		})
+
+		It("owns the credentials Secret of every zone like its own", func() {
+			secret := createSecret()
+			zoneSecret := createSecret()
+			proxmoxCluster := createProxmoxCluster()
+			setCredentialsRefOnProxmoxCluster(proxmoxCluster, secret)
+			setZoneCredentialsRefOnProxmoxCluster(proxmoxCluster, "dc-a", zoneSecret)
+			capiCluster := createOwnerCluster(proxmoxCluster)
+			proxmoxCluster = refreshCluster(proxmoxCluster)
+			setCapiClusterOwnerRefOnProxmoxCluster(proxmoxCluster, capiCluster)
+
+			assertProxmoxClusterHasFinalizer(proxmoxCluster, infrav1.ClusterFinalizer)
+			assertProxmoxClusterIsReady(proxmoxCluster)
+			for _, s := range []*corev1.Secret{secret, zoneSecret} {
+				assertSecretHasNumberOfOwnerRefs(s, 1)
+				assertSecretHasOwnerRef(s, proxmoxCluster.Name)
+				assertSecretHasFinalizer(s, infrav1.SecretFinalizer)
+			}
+
+			deleteCapiCluster(capiCluster)
+			deleteProxmoxCluster(proxmoxCluster)
+			assertProxmoxClusterIsDeleted(proxmoxCluster)
+
+			cleanup(proxmoxCluster, capiCluster, secret, zoneSecret)
+		})
 	})
 
 	It("should remove ProxmoxCluster finalizer if the secret does not exist", func() {
@@ -447,6 +472,31 @@ func setCredentialsRefOnProxmoxCluster(proxmoxCluster *infrav1.ProxmoxCluster, s
 			Name:      secret.Name,
 			Namespace: secret.Namespace,
 		}
+		return ph.Patch(testEnv.GetContext(), proxmoxCluster, patch.WithStatusObservedGeneration{})
+	}).WithTimeout(time.Second * 10).
+		WithPolling(time.Second).
+		Should(Succeed())
+}
+
+// setZoneCredentialsRefOnProxmoxCluster declares a zone backed by the given
+// credentials Secret, with the pool and resolver the schema requires.
+func setZoneCredentialsRefOnProxmoxCluster(proxmoxCluster *infrav1.ProxmoxCluster, zone string, secret *corev1.Secret) {
+	Eventually(func() error {
+		ph, err := patch.NewHelper(proxmoxCluster, testEnv)
+		Expect(err).ShouldNot(HaveOccurred())
+		proxmoxCluster.Spec.ZoneConfigs = append(proxmoxCluster.Spec.ZoneConfigs, infrav1.ZoneConfigSpec{
+			Zone: new(zone),
+			IPv4Config: &infrav1.IPConfigSpec{
+				Addresses: []string{"10.10.20.2-10.10.20.10"},
+				Gateway:   "10.10.20.1",
+				Prefix:    24,
+			},
+			DNSServers: []string{"8.8.8.8"},
+			CredentialsRef: &corev1.SecretReference{
+				Name:      secret.Name,
+				Namespace: secret.Namespace,
+			},
+		})
 		return ph.Patch(testEnv.GetContext(), proxmoxCluster, patch.WithStatusObservedGeneration{})
 	}).WithTimeout(time.Second * 10).
 		WithPolling(time.Second).

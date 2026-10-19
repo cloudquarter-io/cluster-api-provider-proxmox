@@ -326,17 +326,22 @@ spec:
 |-------|------|---------|-------------|
 | `nodes` | `[]string` | — | Proxmox nodes belonging to this zone. VMs assigned to this failure domain are scheduled only on these nodes. |
 | `controlPlaneEligible` | `*bool` | `true` | Whether control plane machines may be placed in this zone. Set to `false` for worker-only zones. |
-| `credentialsRef` | `SecretReference` | the cluster's client | Credentials of the Proxmox cluster backing this zone, in the shape of the ProxmoxCluster's `credentialsRef`. Machines placed in the zone are cloned, configured and deleted through that endpoint. |
+| `credentialsRef` | `SecretReference` | the cluster's client | Credentials of the Proxmox cluster backing this zone, in the shape of the ProxmoxCluster's `credentialsRef`; the Secret must be named. Machines placed in the zone are cloned, configured and deleted through that endpoint. The Secret gets the ProxmoxCluster's owner reference and finalizer, like the cluster's own. |
 | `templateSource` | `TemplateSource` | the machine's | The template the zone's machines are cloned from (`sourceNode` + `templateID`, or `templateSelector`), replacing the ProxmoxMachine's. |
 | `storage` | `string` | the machine's | Target storage of the full clone for the zone's machines. |
-| `networkDevices` | `[]NetworkDevice` | the machine's | Per device name, overrides the `bridge`, `model`, `mtu`, `vlan` and `queues` of the ProxmoxMachine's device of the same name; a device the machine does not declare is added. Addressing stays the machine's and the zone's IP config. |
+| `networkDevices` | `[]ZoneNetworkDevice` | the machine's | Per device name, overrides the `bridge`, `model`, `mtu`, `vlan` and `queues` of the ProxmoxMachine's device of the same name (`net0` when unnamed). Every device named here must be one the machine declares. Addressing stays the machine's device configuration and the zone's IP config. |
 
 ### One Proxmox cluster per zone
 
 A zone may be backed by its own Proxmox cluster: give it a `credentialsRef`,
 the template it holds, its storage and the bridge and VLAN its machines attach
 to. A ProxmoxCluster whose zones all carry a `credentialsRef` needs no
-`credentialsRef` of its own.
+`credentialsRef` of its own; every Machine of such a cluster must then carry
+a `failureDomain` (KubeadmControlPlane sets one, a MachineDeployment only when
+told to), since a machine outside every zone has no endpoint to be reached
+through and its reconcile fails until it has one. Node names must be unique
+across the zones' Proxmox clusters: the scheduler counts a cluster's machines
+per node name.
 
 ```yaml
   zoneConfig:
@@ -376,8 +381,11 @@ to. A ProxmoxCluster whose zones all carry a `credentialsRef` needs no
       dnsServers: ["10.0.2.1"]
 ```
 
-Do not remove a zone that still has machines: a machine whose zone is gone
-is reached through the ProxmoxCluster's client, which does not know the VM.
+Do not remove a zone that still has machines, and do not delete a zone's
+credentials Secret before them. Once any zone carries its own credentials, a
+machine whose zone is no longer declared is not reconciled or deleted at all
+(its VM would otherwise be looked up, or deleted, on the wrong Proxmox
+cluster): it waits until the zone is declared again.
 
 ### How it works
 

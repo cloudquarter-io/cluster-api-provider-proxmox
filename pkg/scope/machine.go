@@ -126,6 +126,9 @@ func NewMachineScope(params MachineScopeParams) (*MachineScope, error) {
 		IPAMHelper:     params.IPAMHelper,
 	}
 	m.failureDomainErr = m.resolvePlacement()
+	if err := m.validateZoneDevices(); err != nil {
+		return nil, err
+	}
 
 	pmoxClient, err := params.InfraCluster.ProxmoxClientForZone(context.TODO(), ptr.Deref(m.zone, ""))
 	if err != nil {
@@ -231,49 +234,73 @@ func (m *MachineScope) templateSource() infrav1.TemplateSource {
 	return m.ProxmoxMachine.Spec.TemplateSource
 }
 
-// mergeNetworkDevices applies the zone's devices onto the machine's: a zone
-// device overrides the bridge, model, mtu, vlan and queues of the machine
-// device of the same name where it sets them, and a zone device the machine
-// does not declare is appended. Addressing fields are never taken from the
-// zone. A device with no name is net0, as everywhere else.
-func mergeNetworkDevices(machineDevices, zoneDevices []infrav1.NetworkDevice) []infrav1.NetworkDevice {
+// deviceName is the name a network device is addressed by: net0 when none is
+// set, as everywhere else.
+func deviceName(name infrav1.NetName) infrav1.NetName {
+	if name == "" {
+		return infrav1.DefaultNetworkDevice
+	}
+	return name
+}
+
+// validateZoneDevices refuses a zone device override that names no device of
+// the ProxmoxMachine: an override is a change to a device the machine
+// declares and whose addressing the machine owns, never a device of its own.
+func (m *MachineScope) validateZoneDevices() error {
+	zc := m.zoneConfig()
+	if zc == nil || len(zc.NetworkDevices) == 0 {
+		return nil
+	}
+	var machineDevices []infrav1.NetworkDevice
+	if m.ProxmoxMachine.Spec.Network != nil {
+		machineDevices = m.ProxmoxMachine.Spec.Network.NetworkDevices
+	}
+	for _, override := range zc.NetworkDevices {
+		declared := false
+		for _, d := range machineDevices {
+			if deviceName(d.Name) == deviceName(override.Name) {
+				declared = true
+				break
+			}
+		}
+		if !declared {
+			return errors.Errorf("zone %q overrides network device %q, which the ProxmoxMachine does not declare", ptr.Deref(m.zone, ""), deviceName(override.Name))
+		}
+	}
+	return nil
+}
+
+// mergeNetworkDevices applies the zone's device overrides onto the machine's
+// devices: a zone device sets the bridge, model, mtu, vlan and queues of the
+// machine device of the same name where it sets them. Addressing is never
+// taken from the zone, and a zone device the machine does not declare is
+// left out (validateZoneDevices refuses it before the scope is used).
+func mergeNetworkDevices(machineDevices []infrav1.NetworkDevice, zoneDevices []infrav1.ZoneNetworkDevice) []infrav1.NetworkDevice {
 	if len(zoneDevices) == 0 {
 		return machineDevices
-	}
-	deviceName := func(d infrav1.NetworkDevice) infrav1.NetName {
-		if d.Name == "" {
-			return infrav1.DefaultNetworkDevice
-		}
-		return d.Name
 	}
 	merged := make([]infrav1.NetworkDevice, len(machineDevices))
 	copy(merged, machineDevices)
 	for _, override := range zoneDevices {
-		i := -1
-		for j := range merged {
-			if deviceName(merged[j]) == deviceName(override) {
-				i = j
-				break
+		for i := range merged {
+			if deviceName(merged[i].Name) != deviceName(override.Name) {
+				continue
 			}
-		}
-		if i < 0 {
-			merged = append(merged, override)
-			continue
-		}
-		if override.Bridge != nil {
-			merged[i].Bridge = override.Bridge
-		}
-		if override.Model != nil {
-			merged[i].Model = override.Model
-		}
-		if override.MTU != nil {
-			merged[i].MTU = override.MTU
-		}
-		if override.VLAN != nil {
-			merged[i].VLAN = override.VLAN
-		}
-		if override.Queues != nil {
-			merged[i].Queues = override.Queues
+			if override.Bridge != nil {
+				merged[i].Bridge = override.Bridge
+			}
+			if override.Model != nil {
+				merged[i].Model = override.Model
+			}
+			if override.MTU != nil {
+				merged[i].MTU = override.MTU
+			}
+			if override.VLAN != nil {
+				merged[i].VLAN = override.VLAN
+			}
+			if override.Queues != nil {
+				merged[i].Queues = override.Queues
+			}
 		}
 	}
 	return merged
@@ -320,12 +347,13 @@ func (m *MachineScope) Storage() *string {
 }
 
 // NetworkDevices returns the machine's network devices with the zone's
-// overrides applied; nil when the ProxmoxMachine declares no network.
+// overrides applied; nil when the ProxmoxMachine declares no network, since
+// an override only changes a device the machine declares.
 func (m *MachineScope) NetworkDevices() []infrav1.NetworkDevice {
-	var machineDevices []infrav1.NetworkDevice
-	if m.ProxmoxMachine.Spec.Network != nil {
-		machineDevices = m.ProxmoxMachine.Spec.Network.NetworkDevices
+	if m.ProxmoxMachine.Spec.Network == nil {
+		return nil
 	}
+	machineDevices := m.ProxmoxMachine.Spec.Network.NetworkDevices
 	if zc := m.zoneConfig(); zc != nil {
 		return mergeNetworkDevices(machineDevices, zc.NetworkDevices)
 	}
