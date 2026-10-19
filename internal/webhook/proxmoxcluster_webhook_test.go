@@ -108,6 +108,13 @@ var _ = Describe("Controller Test", func() {
 			g.Expect(k8sClient.Create(testEnv.GetContext(), &cluster)).To(MatchError(ContainSubstring("addresses may not contain the endpoint IP")))
 		})
 
+		It("should disallow a zone named after the implicit default zone", func() {
+			cluster := validProxmoxCluster("test-zone-default")
+			cluster.Spec.ZoneConfigs = []infrav1.ZoneConfigSpec{zoneConfig(infrav1.DefaultZone, "10.10.20.0/24")}
+			g.Expect(k8sClient.Create(testEnv.GetContext(), &cluster)).To(MatchError(ContainSubstring("spec.zoneConfig[0].zone")))
+			g.Expect(k8sClient.Create(testEnv.GetContext(), &cluster)).To(MatchError(ContainSubstring("reserved")))
+		})
+
 		It("should disallow a zone credentialsRef without a name", func() {
 			cluster := validProxmoxCluster("test-zone-credentials")
 			zone := zoneConfig("dc-a", "10.10.20.0/24")
