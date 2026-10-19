@@ -2,7 +2,7 @@ name: Version Consistency
 
 on:
   push:
-    branches: ["main"]
+    branches: ["main", "cloudquarter"]
   pull_request:
 
 permissions:
