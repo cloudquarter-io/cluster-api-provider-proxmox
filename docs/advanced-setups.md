@@ -335,7 +335,8 @@ spec:
 
 A zone may be backed by its own Proxmox cluster: give it a `credentialsRef`,
 the template it holds, its storage and the bridge and VLAN its machines attach
-to. A ProxmoxCluster whose zones all carry a `credentialsRef` needs no
+to. The name `default` is reserved for the implicit zone, the ProxmoxCluster
+itself, and is refused on a zone. A ProxmoxCluster whose zones all carry a `credentialsRef` needs no
 `credentialsRef` of its own; every Machine of such a cluster must then carry
 a `failureDomain` (KubeadmControlPlane sets one, a MachineDeployment only when
 told to), since a machine outside every zone has no endpoint to be reached

@@ -153,6 +153,27 @@ var _ = Describe("Controller Test", func() {
 				WithPolling(time.Second).
 				Should(Succeed())
 		})
+
+		It("should disallow adding a reserved zone name or a nameless zone credentialsRef", func() {
+			cluster := validProxmoxCluster("test-cluster-zones")
+			g.Expect(k8sClient.Create(testEnv.GetContext(), &cluster)).To(Succeed())
+
+			g.Expect(k8sClient.Get(testEnv.GetContext(), client.ObjectKeyFromObject(&cluster), &cluster)).To(Succeed())
+			cluster.Spec.ZoneConfigs = []infrav1.ZoneConfigSpec{zoneConfig(infrav1.DefaultZone, "10.10.20.0/24")}
+			g.Expect(k8sClient.Update(testEnv.GetContext(), &cluster)).To(MatchError(ContainSubstring("reserved")))
+
+			g.Expect(k8sClient.Get(testEnv.GetContext(), client.ObjectKeyFromObject(&cluster), &cluster)).To(Succeed())
+			zone := zoneConfig("dc-a", "10.10.20.0/24")
+			zone.CredentialsRef = &corev1.SecretReference{Namespace: metav1.NamespaceDefault}
+			cluster.Spec.ZoneConfigs = []infrav1.ZoneConfigSpec{zone}
+			g.Expect(k8sClient.Update(testEnv.GetContext(), &cluster)).To(MatchError(ContainSubstring("spec.zoneConfig[0].credentialsRef.name")))
+
+			g.Eventually(func(g Gomega) {
+				g.Expect(client.IgnoreNotFound(k8sClient.Delete(testEnv.GetContext(), &cluster))).To(Succeed())
+			}).WithTimeout(time.Second * 10).
+				WithPolling(time.Second).
+				Should(Succeed())
+		})
 	})
 })
 
