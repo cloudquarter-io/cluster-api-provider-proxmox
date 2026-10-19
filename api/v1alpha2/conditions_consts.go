@@ -105,6 +105,12 @@ const (
 	// the zone is added to spec.zoneConfig.
 	ProxmoxMachineVirtualMachineProvisionedFailureDomainNotReadyReason = "FailureDomainNotReady"
 
+	// ProxmoxMachineVirtualMachineProvisionedZoneNetworkDevicesInvalidReason documents
+	// a ProxmoxMachine whose zone overrides a network device the machine does
+	// not declare. It resolves when the zone's networkDevices name only
+	// devices the ProxmoxMachine declares.
+	ProxmoxMachineVirtualMachineProvisionedZoneNetworkDevicesInvalidReason = "ZoneNetworkDevicesInvalid"
+
 	// ProxmoxMachineVirtualMachineProvisionedVMProvisionFailedReason documents a failure
 	// during virtual machine provisioning.
 	ProxmoxMachineVirtualMachineProvisionedVMProvisionFailedReason = "VMProvisionFailed"

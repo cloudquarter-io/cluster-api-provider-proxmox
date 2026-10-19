@@ -312,9 +312,17 @@ var _ = Describe("External Credentials Tests", func() {
 				assertSecretHasFinalizer(s, infrav1.SecretFinalizer)
 			}
 
+			By("releasing the zone's Secret once the zone is dropped from the spec")
+			clearZoneConfigsOnProxmoxCluster(proxmoxCluster)
+			assertSecretHasNoFinalizer(zoneSecret, infrav1.SecretFinalizer)
+			assertSecretHasNumberOfOwnerRefs(zoneSecret, 0)
+			assertSecretHasFinalizer(secret, infrav1.SecretFinalizer)
+
+			By("releasing the cluster's Secret once the cluster is deleted")
 			deleteCapiCluster(capiCluster)
 			deleteProxmoxCluster(proxmoxCluster)
 			assertProxmoxClusterIsDeleted(proxmoxCluster)
+			assertSecretHasNoFinalizer(secret, infrav1.SecretFinalizer)
 
 			cleanup(proxmoxCluster, capiCluster, secret, zoneSecret)
 		})
@@ -501,6 +509,33 @@ func setZoneCredentialsRefOnProxmoxCluster(proxmoxCluster *infrav1.ProxmoxCluste
 	}).WithTimeout(time.Second * 10).
 		WithPolling(time.Second).
 		Should(Succeed())
+}
+
+// clearZoneConfigsOnProxmoxCluster drops every zone from the spec.
+func clearZoneConfigsOnProxmoxCluster(proxmoxCluster *infrav1.ProxmoxCluster) {
+	Eventually(func() error {
+		refreshCluster(proxmoxCluster)
+		ph, err := patch.NewHelper(proxmoxCluster, testEnv)
+		Expect(err).ShouldNot(HaveOccurred())
+		proxmoxCluster.Spec.ZoneConfigs = nil
+		return ph.Patch(testEnv.GetContext(), proxmoxCluster, patch.WithStatusObservedGeneration{})
+	}).WithTimeout(time.Second * 10).
+		WithPolling(time.Second).
+		Should(Succeed())
+}
+
+// assertSecretHasNoFinalizer waits until the Secret no longer carries the
+// finalizer, which is how the controller releases a Secret it owned alone.
+func assertSecretHasNoFinalizer(secret *corev1.Secret, finalizer string) {
+	key := client.ObjectKey{Namespace: secret.Namespace, Name: secret.Name}
+	Eventually(func() bool {
+		if err := testEnv.Get(testEnv.GetContext(), key, secret); err != nil {
+			return false
+		}
+		return !ctrlutil.ContainsFinalizer(secret, finalizer)
+	}).WithTimeout(time.Second * 10).
+		WithPolling(time.Second).
+		Should(BeTrue())
 }
 
 func setRandomCredentialsRefOnProxmoxCluster(proxmoxCluster *infrav1.ProxmoxCluster) {

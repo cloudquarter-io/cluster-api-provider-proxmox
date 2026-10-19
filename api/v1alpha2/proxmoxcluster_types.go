@@ -29,6 +29,11 @@ import (
 )
 
 const (
+	// DefaultZone is the name of the implicit zone: the ProxmoxCluster's own
+	// IP config, pools and endpoint. A machine naming it, or naming no zone,
+	// is placed on the ProxmoxCluster itself.
+	DefaultZone = "default"
+
 	// ProxmoxClusterKind is the ProxmoxCluster kind.
 	ProxmoxClusterKind = "ProxmoxCluster"
 	// ClusterFinalizer allows cleaning up resources associated with a
@@ -454,7 +459,7 @@ func (c *ProxmoxCluster) AddInClusterZoneRef(pool client.Object) {
 
 	// Add to default zone (as that has no label yet)
 	if !exists {
-		zone = "default"
+		zone = DefaultZone
 	}
 
 	if c.Status.InClusterZoneRef == nil {

@@ -506,4 +506,39 @@ func TestNewMachineScope_ZoneClient(t *testing.T) {
 		require.Error(t, err)
 		require.Contains(t, err.Error(), `zone "gone" is not declared`)
 	})
+
+	t.Run("a machine naming the default zone on its network gets the ProxmoxCluster's client", func(t *testing.T) {
+		scope, err := NewMachineScope(MachineScopeParams{
+			Client:       k8sClient,
+			Cluster:      &clusterv1.Cluster{},
+			Machine:      &clusterv1.Machine{},
+			InfraCluster: infraCluster,
+			ProxmoxMachine: &infrav1.ProxmoxMachine{
+				ObjectMeta: metav1.ObjectMeta{Name: "machine", Namespace: "default"},
+				Spec:       infrav1.ProxmoxMachineSpec{Network: &infrav1.NetworkSpec{Zone: new(infrav1.DefaultZone)}},
+			},
+			IPAMHelper: &ipam.Helper{},
+		})
+		require.NoError(t, err)
+		require.Same(t, defaultClient, scope.ProxmoxClient())
+	})
+
+	t.Run("a zone device override the machine cannot take still yields a scope", func(t *testing.T) {
+		withOverride := cluster.DeepCopy()
+		withOverride.Spec.ZoneConfigs[0].NetworkDevices = []infrav1.ZoneNetworkDevice{{Name: "net9", Bridge: new("vmbr-extra")}}
+		scope, err := NewMachineScope(MachineScopeParams{
+			Client:         k8sClient,
+			Cluster:        &clusterv1.Cluster{},
+			Machine:        &clusterv1.Machine{Spec: clusterv1.MachineSpec{FailureDomain: "dc-a"}},
+			InfraCluster:   &ClusterScope{client: k8sClient, ProxmoxCluster: withOverride, ProxmoxClient: defaultClient, newClient: infraCluster.newClient},
+			ProxmoxMachine: &infrav1.ProxmoxMachine{ObjectMeta: metav1.ObjectMeta{Name: "machine", Namespace: "default"}},
+			IPAMHelper:     &ipam.Helper{},
+		})
+		// Deletion must still reach the zone's endpoint; only provisioning
+		// stops on the recorded error.
+		require.NoError(t, err)
+		require.Same(t, zoneClient, scope.ProxmoxClient())
+		require.Error(t, scope.ZoneDevicesError())
+		require.Contains(t, scope.ZoneDevicesError().Error(), `"net9"`)
+	})
 }

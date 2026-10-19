@@ -77,6 +77,12 @@ type MachineScope struct {
 	// zone (e.g. deletion) still get a usable scope.
 	failureDomainErr error
 
+	// zoneDevicesErr records a zone network device override that names no
+	// device of the ProxmoxMachine. Kept on the scope like failureDomainErr:
+	// the override only matters to the clone and its configuration, so
+	// deletion proceeds with it unresolved.
+	zoneDevicesErr error
+
 	// proxmoxClient reaches the Proxmox cluster backing the machine's zone,
 	// resolved once by NewMachineScope. Every Proxmox call about the machine
 	// goes through it, so a zone backed by its own Proxmox cluster clones,
@@ -126,9 +132,7 @@ func NewMachineScope(params MachineScopeParams) (*MachineScope, error) {
 		IPAMHelper:     params.IPAMHelper,
 	}
 	m.failureDomainErr = m.resolvePlacement()
-	if err := m.validateZoneDevices(); err != nil {
-		return nil, err
-	}
+	m.zoneDevicesErr = m.validateZoneDevices()
 
 	pmoxClient, err := params.InfraCluster.ProxmoxClientForZone(context.TODO(), ptr.Deref(m.zone, ""))
 	if err != nil {
@@ -241,6 +245,13 @@ func deviceName(name infrav1.NetName) infrav1.NetName {
 		return infrav1.DefaultNetworkDevice
 	}
 	return name
+}
+
+// ZoneDevicesError returns the error validateZoneDevices found, or nil.
+// Callers that are about to provision or configure the VM must treat a
+// non-nil result as "zone network devices invalid"; deletion ignores it.
+func (m *MachineScope) ZoneDevicesError() error {
+	return m.zoneDevicesErr
 }
 
 // validateZoneDevices refuses a zone device override that names no device of

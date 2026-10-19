@@ -171,12 +171,12 @@ func zonesWithOwnCredentials(proxmoxCluster *infrav1.ProxmoxCluster) bool {
 
 // ProxmoxClientForZone returns the client that reaches the Proxmox cluster
 // backing the named zone: a client built from the zone's own credentialsRef,
-// or the ProxmoxCluster's client when the zone is empty or declares no
-// credentials of its own. It fails when the ProxmoxCluster's client is
-// needed and none was configured, and when the zone is not declared while
-// another zone carries its own credentials: that machine's VM lives on an
-// endpoint the ProxmoxCluster can no longer name, and reaching another one
-// would find, or delete, the wrong VM.
+// or the ProxmoxCluster's client when the zone is empty, is the default
+// zone, or declares no credentials of its own. It fails when the
+// ProxmoxCluster's client is needed and none was configured, and when the
+// zone is not declared while another zone carries its own credentials: that
+// machine's VM lives on an endpoint the ProxmoxCluster can no longer name,
+// and reaching another one would find, or delete, the wrong VM.
 //
 // The scope lives for one reconcile, so a zone's client is built once per
 // machine reconcile, as the ProxmoxCluster's own client is.
@@ -194,7 +194,7 @@ func (s *ClusterScope) ProxmoxClientForZone(ctx context.Context, zone string) (c
 		return pmoxClient, nil
 	}
 
-	if zc == nil && zone != "" && zonesWithOwnCredentials(s.ProxmoxCluster) {
+	if zc == nil && zone != "" && zone != infrav1.DefaultZone && zonesWithOwnCredentials(s.ProxmoxCluster) {
 		return nil, errors.Errorf("zone %q is not declared by the ProxmoxCluster while other zones carry their own credentialsRef: the machine cannot be reached until the zone is declared again", zone)
 	}
 

@@ -326,10 +326,10 @@ spec:
 |-------|------|---------|-------------|
 | `nodes` | `[]string` | — | Proxmox nodes belonging to this zone. VMs assigned to this failure domain are scheduled only on these nodes. |
 | `controlPlaneEligible` | `*bool` | `true` | Whether control plane machines may be placed in this zone. Set to `false` for worker-only zones. |
-| `credentialsRef` | `SecretReference` | the cluster's client | Credentials of the Proxmox cluster backing this zone, in the shape of the ProxmoxCluster's `credentialsRef`; the Secret must be named. Machines placed in the zone are cloned, configured and deleted through that endpoint. The Secret gets the ProxmoxCluster's owner reference and finalizer, like the cluster's own. |
+| `credentialsRef` | `SecretReference` | the cluster's client | Credentials of the Proxmox cluster backing this zone, in the shape of the ProxmoxCluster's `credentialsRef`; the Secret must be named. Machines placed in the zone are cloned, configured and deleted through that endpoint. The Secret gets the ProxmoxCluster's owner reference and finalizer, like the cluster's own, and is released when the zone or the reference is removed from the spec. |
 | `templateSource` | `TemplateSource` | the machine's | The template the zone's machines are cloned from (`sourceNode` + `templateID`, or `templateSelector`), replacing the ProxmoxMachine's. |
 | `storage` | `string` | the machine's | Target storage of the full clone for the zone's machines. |
-| `networkDevices` | `[]ZoneNetworkDevice` | the machine's | Per device name, overrides the `bridge`, `model`, `mtu`, `vlan` and `queues` of the ProxmoxMachine's device of the same name (`net0` when unnamed). Every device named here must be one the machine declares. Addressing stays the machine's device configuration and the zone's IP config. |
+| `networkDevices` | `[]ZoneNetworkDevice` | the machine's | Per device name, overrides the `bridge`, `model`, `mtu`, `vlan` and `queues` of the ProxmoxMachine's device of the same name (`net0` when unnamed). Every device named here must be one the machine declares; an override naming another device keeps the zone's machines from being cloned until it is fixed. Addressing stays the machine's device configuration and the zone's IP config; `mtu` sets the Proxmox NIC only, the guest's link MTU is still the machine device's `linkMtu`. |
 
 ### One Proxmox cluster per zone
 

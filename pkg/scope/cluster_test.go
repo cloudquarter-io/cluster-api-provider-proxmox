@@ -221,6 +221,12 @@ func TestClusterScope_ProxmoxClientForZone(t *testing.T) {
 		require.Contains(t, err.Error(), `zone "gone" is not declared`)
 	})
 
+	t.Run("the default zone is the ProxmoxCluster itself, whatever the other zones carry", func(t *testing.T) {
+		got, err := clusterScope.ProxmoxClientForZone(context.Background(), infrav1.DefaultZone)
+		require.NoError(t, err)
+		require.Same(t, defaultClient, got)
+	})
+
 	t.Run("an undeclared zone shares the default client when no zone has credentials", func(t *testing.T) {
 		sharedOnly := &ClusterScope{ProxmoxClient: defaultClient, ProxmoxCluster: &infrav1.ProxmoxCluster{
 			Spec: infrav1.ProxmoxClusterSpec{ZoneConfigs: []infrav1.ZoneConfigSpec{{Zone: new("shared")}}},

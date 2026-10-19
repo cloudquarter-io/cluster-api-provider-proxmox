@@ -227,6 +227,20 @@ func (r *ProxmoxMachineReconciler) reconcileNormal(ctx context.Context, machineS
 		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
 	}
 
+	// A zone network device override the machine cannot take is recorded at
+	// scope construction like the failure domain; the VM is neither cloned
+	// nor configured until the zone names only devices the machine declares.
+	if err := machineScope.ZoneDevicesError(); err != nil {
+		machineScope.Logger.Error(err, "zone network devices invalid")
+		conditions.Set(machineScope.ProxmoxMachine, metav1.Condition{
+			Type:    infrav1.ProxmoxMachineVirtualMachineProvisionedCondition,
+			Status:  metav1.ConditionFalse,
+			Reason:  infrav1.ProxmoxMachineVirtualMachineProvisionedZoneNetworkDevicesInvalidReason,
+			Message: err.Error(),
+		})
+		return ctrl.Result{RequeueAfter: 30 * time.Second}, nil
+	}
+
 	// find the vm
 	// Get or create the VM.
 	vm, err := vmservice.ReconcileVM(ctx, machineScope)
