@@ -5,17 +5,33 @@ on:
     # Sequence of patterns matched against refs/tags
     tags:
       - 'v*' # Push events to matching v*, i.e. v1.0, v20.15.10
+  workflow_dispatch:
+    inputs:
+      version:
+        description: >-
+          Dry run: build the release assets for this version and keep them as a
+          workflow artifact. No release is created and no image is pushed.
+        required: true
+        default: v0.0.0-dryrun
+        type: string
 
 permissions:
   contents: write # Allow to create a release.
 
 jobs:
   build:
-    name: create draft release
+    name: release assets
     runs-on: ubuntu-latest
     steps:
       - name: Set env
-        run:  echo "RELEASE_TAG=${GITHUB_REF##refs/tags/}" >> "$GITHUB_ENV"
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "RELEASE_TAG=${GITHUB_REF##refs/tags/}" >> "$GITHUB_ENV"
+          else
+            echo "RELEASE_TAG=${{ inputs.version }}" >> "$GITHUB_ENV"
+          fi
+          # The image the container-image workflow publishes for this repository.
+          echo "REPOSITORY=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
       - name: checkout code
         uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -26,13 +42,33 @@ jobs:
           go-version-file: go.mod
       - name: generate release artifacts
         run: |
-          make release-manifests "RELEASE_VERSION=$RELEASE_TAG"
+          make release-manifests "RELEASE_VERSION=$RELEASE_TAG" "REPOSITORY=$REPOSITORY"
       - name: generate release templates
         run: |
           make release-templates
+      - name: checksums
+        run: |
+          make release-checksums
+          cat out/SHA256SUMS
+      - name: verify the manifest references the published image
+        run: |
+          grep -q "image: ${REPOSITORY}:${RELEASE_TAG}$" out/infrastructure-components.yaml
+          ! grep -q "ghcr.io/ionos-cloud" out/infrastructure-components.yaml
+      - name: keep the assets of a dry run
+        if: github.event_name == 'workflow_dispatch'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-assets-${{ env.RELEASE_TAG }}
+          path: out/*
+          if-no-files-found: error
       - name: Release
+        if: github.event_name == 'push'
         uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
         with:
-          draft: true
+          # Published, not a draft: consumers fetch the assets by their public
+          # download URL and pin their digest. A tag with a pre-release
+          # suffix (v0.10.0-cq.1) is marked as such.
+          draft: false
+          prerelease: ${{ contains(github.ref_name, '-') }}
           files: out/*
           generate_release_notes: true
