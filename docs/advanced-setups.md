@@ -382,6 +382,9 @@ per node name.
       dnsServers: ["10.0.2.1"]
 ```
 
+A zone's `dnsServers` are the nameservers its machines' guest network
+configuration carries; a machine in no zone carries the ProxmoxCluster's.
+
 Do not remove a zone that still has machines, and do not delete a zone's
 credentials Secret before them. Once any zone carries its own credentials, a
 machine whose zone is no longer declared is not reconciled or deleted at all

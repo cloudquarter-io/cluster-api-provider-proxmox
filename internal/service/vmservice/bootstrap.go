@@ -230,7 +230,7 @@ func getNetworkConfigDataForDevice(ctx context.Context, machineScope *scope.Mach
 		return nil, errors.New("unable to extract mac address")
 	}
 
-	dns := machineScope.InfraCluster.ProxmoxCluster.Spec.DNSServers
+	dns := machineScope.DNSServers()
 
 	cloudinitNetworkConfigData := &network.ConfigData{
 		MacAddress: macAddress,
@@ -327,7 +327,7 @@ func getNetworkDevices(ctx context.Context, machineScope *scope.MachineScope, ne
 		}
 		// Per-interface DNS override (nic.DNSServers) is applied by
 		// getCommonInterfaceConfig below; conf.DNSServers is already seeded with
-		// the cluster default in getNetworkConfigDataForDevice.
+		// the zone's or the cluster's list in getNetworkConfigDataForDevice.
 		if err := getCommonInterfaceConfig(ctx, machineScope, conf, nic.InterfaceConfig); err != nil {
 			return nil, errors.Wrapf(err, "unable to convert routing config for device=%s", nic.Name)
 		}

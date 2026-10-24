@@ -175,6 +175,32 @@ func TestMachineScope_SkipCloudInit(t *testing.T) {
 	require.False(t, scope.SkipQemuGuestCheck())
 }
 
+func TestMachineScope_DNSServers(t *testing.T) {
+	clusterDNS := []string{"192.0.2.53"}
+	cluster := &infrav1.ProxmoxCluster{
+		Spec: infrav1.ProxmoxClusterSpec{
+			DNSServers: clusterDNS,
+			ZoneConfigs: []infrav1.ZoneConfigSpec{
+				{Zone: new("zone-a"), DNSServers: []string{"10.0.1.2", "10.0.1.3"}},
+				{Zone: new("zone-b")},
+			},
+		},
+	}
+	newScope := func(failureDomain string) *MachineScope {
+		scope := &MachineScope{
+			Machine:        &clusterv1.Machine{Spec: clusterv1.MachineSpec{FailureDomain: failureDomain}},
+			InfraCluster:   &ClusterScope{ProxmoxCluster: cluster},
+			ProxmoxMachine: &infrav1.ProxmoxMachine{},
+		}
+		require.NoError(t, scope.resolvePlacement())
+		return scope
+	}
+
+	require.Equal(t, []string{"10.0.1.2", "10.0.1.3"}, newScope("zone-a").DNSServers(), "a zone's nameservers reach its machines")
+	require.Equal(t, clusterDNS, newScope("zone-b").DNSServers(), "a zone without nameservers falls back to the cluster's")
+	require.Equal(t, clusterDNS, newScope("").DNSServers(), "a machine in no zone reads the cluster's")
+}
+
 func TestMachineScope_ResolvePlacement(t *testing.T) {
 	cluster := &infrav1.ProxmoxCluster{
 		Spec: infrav1.ProxmoxClusterSpec{
