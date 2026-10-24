@@ -230,7 +230,7 @@ func getNetworkConfigDataForDevice(ctx context.Context, machineScope *scope.Mach
 		return nil, errors.New("unable to extract mac address")
 	}
 
-	dns := machineScope.InfraCluster.ProxmoxCluster.Spec.DNSServers
+	dns := machineScope.DNSServers()
 
 	cloudinitNetworkConfigData := &network.ConfigData{
 		MacAddress: macAddress,

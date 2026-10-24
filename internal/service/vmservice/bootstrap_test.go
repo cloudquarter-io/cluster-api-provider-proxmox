@@ -29,6 +29,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
+	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	"sigs.k8s.io/cluster-api/util/conditions"
 
 	ipamicv1 "sigs.k8s.io/cluster-api-ipam-provider-in-cluster/api/v1alpha2"
@@ -340,6 +341,29 @@ func TestGetNetworkConfigDataForDevice_MissingIPAddress(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, cfg.MacAddress, "A6:23:64:4D:84:CB")
 	require.Len(t, cfg.IPConfigs, 0)
+}
+
+func TestGetNetworkConfigDataForDevice_ZoneDNS(t *testing.T) {
+	inZone := func(zone string, dns ...string) testScopeMod {
+		return func(machine *clusterv1.Machine, infraCluster *infrav1.ProxmoxCluster, _ *infrav1.ProxmoxMachine) {
+			machine.Spec.FailureDomain = zone
+			infraCluster.Spec.ZoneConfigs = []infrav1.ZoneConfigSpec{{Zone: new(zone), DNSServers: dns}}
+		}
+	}
+
+	// A machine in a zone that declares nameservers hands those to the guest.
+	machineScope, _, _ := setupReconcilerTestWithCondition(t, infrav1.ProxmoxMachineVirtualMachineProvisionedWaitingForBootstrapDataReconciliationReason, inZone("zone-a", "10.0.1.2"))
+	setupVMWithMetadata(machineScope)
+	cfg, err := getNetworkConfigDataForDevice(context.Background(), machineScope, "net0", nil)
+	require.NoError(t, err)
+	require.Equal(t, []string{"10.0.1.2"}, cfg.DNSServers)
+
+	// A zone without nameservers leaves the ProxmoxCluster's in place.
+	machineScope, _, _ = setupReconcilerTestWithCondition(t, infrav1.ProxmoxMachineVirtualMachineProvisionedWaitingForBootstrapDataReconciliationReason, inZone("zone-b"))
+	setupVMWithMetadata(machineScope)
+	cfg, err = getNetworkConfigDataForDevice(context.Background(), machineScope, "net0", nil)
+	require.NoError(t, err)
+	require.Equal(t, machineScope.InfraCluster.ProxmoxCluster.Spec.DNSServers, cfg.DNSServers)
 }
 
 func TestGetNetworkConfigDataForDevice_MissingMACAddress(t *testing.T) {

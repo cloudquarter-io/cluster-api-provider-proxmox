@@ -210,6 +210,16 @@ func (m *MachineScope) Zone() *string {
 	return m.zone
 }
 
+// DNSServers returns the nameservers the machine's guest network
+// configuration carries: the zone's dnsServers when the machine is placed in a
+// zone that declares them, else the ProxmoxCluster's.
+func (m *MachineScope) DNSServers() []string {
+	if zc := m.zoneConfig(); zc != nil && len(zc.DNSServers) > 0 {
+		return zc.DNSServers
+	}
+	return m.InfraCluster.ProxmoxCluster.Spec.DNSServers
+}
+
 // FailureDomainError returns the FailureDomainNotFoundError encountered
 // while resolving placement, or nil. Callers that are about to provision
 // must treat a non-nil result as "failure domain not ready".
