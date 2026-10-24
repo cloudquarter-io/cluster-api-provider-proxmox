@@ -383,8 +383,7 @@ per node name.
 ```
 
 A zone's `dnsServers` are the nameservers its machines' guest network
-configuration carries; a machine in no zone, or in a zone that declares none,
-carries the ProxmoxCluster's.
+configuration carries; a machine in no zone carries the ProxmoxCluster's.
 
 Do not remove a zone that still has machines, and do not delete a zone's
 credentials Secret before them. Once any zone carries its own credentials, a
