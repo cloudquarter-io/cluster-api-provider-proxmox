@@ -149,3 +149,14 @@ To fix deletion deadlocks in such cases:
  - Delete the `machine`
 
 After these steps, VMs may linger in proxmox. Carefully remove those.
+
+## Machine paused on a disk write error
+When a write to a virtual machine's disk fails because its storage is full, QEMU pauses the
+virtual machine (`qm status <vmid> --verbose` shows `qmpstatus: io-error`), while Proxmox
+still reports it as running. The controller reads every ready ProxmoxMachine's virtual machine
+again every `--vm-pause-check-interval` (default `30s`; `0` reads it only when the
+ProxmoxMachine changes) and requests its resume, once more on every read while the pause lasts.
+The ProxmoxMachine carries the condition `VirtualMachinePaused` (reason `IOError`) in the
+meantime, with the outcome of the last request in its message. A lock other than `backup` holds
+the request back until it is released. Free space on the storage: a resume that finds it
+still full pauses again at the next write.

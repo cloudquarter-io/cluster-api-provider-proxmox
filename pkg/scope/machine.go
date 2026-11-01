@@ -483,6 +483,7 @@ func (m *MachineScope) PatchObject() error {
 		patch.WithOwnedConditions{Conditions: []string{
 			"Ready",
 			infrav1.ProxmoxMachineVirtualMachineProvisionedCondition,
+			infrav1.ProxmoxMachineVirtualMachinePausedCondition,
 		}})
 }
 

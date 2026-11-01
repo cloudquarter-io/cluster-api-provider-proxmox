@@ -79,6 +79,8 @@ func ReconcileVM(ctx context.Context, scope *scope.MachineScope) (infrav1.Virtua
 		return vm, err
 	} // VirtualMachineProvisioned reason is Cloning
 
+	reconcileIOErrorPause(ctx, scope)
+
 	// Recover IP/address status for already-running machines (e.g. restored from
 	// backup) whose status was lost. This is read-only and a no-op during normal
 	// provisioning; it does not advance the provisioning state machine below.

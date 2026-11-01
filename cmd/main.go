@@ -67,6 +67,7 @@ var (
 	leaderElectionRenewDeadline time.Duration
 	leaderElectionRetryPeriod   time.Duration
 	enableWebhooks              bool
+	vmPauseCheckInterval        time.Duration
 	probeAddr                   string
 	managerOptions              = flags.ManagerOptions{}
 
@@ -199,10 +200,11 @@ func setupReconcilers(ctx context.Context, mgr ctrl.Manager, proxmoxClient capmo
 		return fmt.Errorf("setting up ProxmoxCluster controller: %w", err)
 	}
 	if err := (&controller.ProxmoxMachineReconciler{
-		Client:        mgr.GetClient(),
-		Scheme:        mgr.GetScheme(),
-		Recorder:      mgr.GetEventRecorderFor("proxmoxmachine-controller"),
-		ProxmoxClient: proxmoxClient,
+		Client:               mgr.GetClient(),
+		Scheme:               mgr.GetScheme(),
+		Recorder:             mgr.GetEventRecorderFor("proxmoxmachine-controller"),
+		ProxmoxClient:        proxmoxClient,
+		VMPauseCheckInterval: vmPauseCheckInterval,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setting up ProxmoxMachine controller: %w", err)
 	}
@@ -278,6 +280,8 @@ func initFlagsAndEnv(fs *pflag.FlagSet) {
 		"Duration the LeaderElector clients should wait between tries of actions (duration string)")
 	fs.BoolVar(&enableWebhooks, "enable-webhooks", true,
 		"If true, run webhook server alongside manager")
+	fs.DurationVar(&vmPauseCheckInterval, "vm-pause-check-interval", 30*time.Second,
+		"Interval at which a ready ProxmoxMachine's virtual machine is read again, to resume it if QEMU paused it on a disk write error. 0 reads it only when the ProxmoxMachine changes.")
 
 	flags.AddManagerOptions(fs, &managerOptions)
 

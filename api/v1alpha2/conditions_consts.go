@@ -128,3 +128,17 @@ const (
 	// during virtual machine deletion.
 	ProxmoxMachineVirtualMachineProvisionedDeletionFailedReason = "DeletionFailed"
 )
+
+// Conditions and Reasons related to a ProxmoxMachine's virtual machine paused by QEMU.
+const (
+	// ProxmoxMachineVirtualMachinePausedCondition is True while QEMU holds the
+	// ProxmoxMachine's virtual machine paused on a disk write error. Proxmox
+	// reports such a virtual machine as running. The condition is absent
+	// otherwise.
+	ProxmoxMachineVirtualMachinePausedCondition = "VirtualMachinePaused"
+
+	// ProxmoxMachineVirtualMachinePausedIOErrorReason documents a virtual machine
+	// QEMU paused on a disk write error (qmpstatus io-error), by default because
+	// its storage is full. The controller requests its resume.
+	ProxmoxMachineVirtualMachinePausedIOErrorReason = "IOError"
+)

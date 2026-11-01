@@ -54,6 +54,11 @@ type ProxmoxMachineReconciler struct {
 	Scheme        *runtime.Scheme
 	Recorder      record.EventRecorder
 	ProxmoxClient proxmox.Client
+
+	// VMPauseCheckInterval is how often a ready ProxmoxMachine is reconciled
+	// again, so that a virtual machine QEMU paused on a disk write error is
+	// resumed. Zero reconciles it only on change.
+	VMPauseCheckInterval time.Duration
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -270,14 +275,16 @@ func (r *ProxmoxMachineReconciler) reconcileNormal(ctx context.Context, machineS
 	machineScope.ProxmoxMachine.SetLabels(labels)
 
 	machineScope.SetReady()
+	if !conditions.IsTrue(machineScope.ProxmoxMachine, infrav1.ProxmoxMachineVirtualMachineProvisionedCondition) {
+		machineScope.Logger.Info("ProxmoxMachine is ready")
+	}
 	conditions.Set(machineScope.ProxmoxMachine, metav1.Condition{
 		Type:   infrav1.ProxmoxMachineVirtualMachineProvisionedCondition,
 		Status: metav1.ConditionTrue,
 		Reason: clusterv1.ProvisionedReason,
 	})
-	machineScope.Logger.Info("ProxmoxMachine is ready")
 
-	return reconcile.Result{}, nil
+	return reconcile.Result{RequeueAfter: r.VMPauseCheckInterval}, nil
 }
 
 func (r *ProxmoxMachineReconciler) getInfraCluster(ctx context.Context, logger *logr.Logger, cluster *clusterv1.Cluster, proxmoxMachine *infrav1.ProxmoxMachine) (*scope.ClusterScope, error) {

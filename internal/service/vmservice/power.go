@@ -61,6 +61,43 @@ func reconcilePowerState(ctx context.Context, machineScope *scope.MachineScope) 
 	return false, nil
 }
 
+// qmpStatusIOError is the QEMU run state of a virtual machine paused on a disk
+// write error. Proxmox reports its status as running.
+const qmpStatusIOError = "io-error"
+
+// reconcileIOErrorPause resumes a virtual machine QEMU paused on a disk write
+// error, at any stage of the machine's life, and holds the VirtualMachinePaused
+// condition while the pause lasts. Nothing else resumes it: Proxmox, and its HA
+// manager, read the virtual machine as running. The resume is a request: the
+// next reconcile reads the virtual machine again and requests it again while
+// the pause lasts. A lock other than backup, which Proxmox's resume accepts,
+// holds the request back until it is released.
+func reconcileIOErrorPause(ctx context.Context, machineScope *scope.MachineScope) {
+	vm := machineScope.VirtualMachine
+	if vm == nil || vm.Status != proxmox.StatusVirtualMachineRunning || vm.QMPStatus != qmpStatusIOError {
+		conditions.Delete(machineScope.ProxmoxMachine, infrav1.ProxmoxMachineVirtualMachinePausedCondition)
+		return
+	}
+
+	message := "QEMU paused the virtual machine on a disk write error; its resume is requested"
+	switch {
+	case vm.Lock != "" && vm.Lock != "backup":
+		message = fmt.Sprintf("QEMU paused the virtual machine on a disk write error; its resume waits for the %s lock", vm.Lock)
+	default:
+		machineScope.Info("resuming the virtual machine QEMU paused on a disk write error", "vmid", vm.VMID)
+		if _, err := machineScope.ProxmoxClient().ResumeVM(ctx, vm); err != nil {
+			machineScope.Error(err, "unable to resume the virtual machine", "vmid", vm.VMID)
+			message = fmt.Sprintf("QEMU paused the virtual machine on a disk write error; resuming it failed: %v", err)
+		}
+	}
+	conditions.Set(machineScope.ProxmoxMachine, metav1.Condition{
+		Type:    infrav1.ProxmoxMachineVirtualMachinePausedCondition,
+		Status:  metav1.ConditionTrue,
+		Reason:  infrav1.ProxmoxMachineVirtualMachinePausedIOErrorReason,
+		Message: message,
+	})
+}
+
 func startVirtualMachine(ctx context.Context, client capmox.Client, vm *proxmox.VirtualMachine) (*proxmox.Task, error) {
 	if vm.IsPaused() {
 		t, err := client.ResumeVM(ctx, vm)
