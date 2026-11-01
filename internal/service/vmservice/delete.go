@@ -34,6 +34,9 @@ import (
 // DeleteVM implements the logic of destroying a VM.
 func DeleteVM(ctx context.Context, machineScope *scope.MachineScope) error {
 	vmID := machineScope.ProxmoxMachine.GetVirtualMachineID()
+	if err := locateVMForDelete(ctx, machineScope); err != nil {
+		return err
+	}
 	node := machineScope.LocateProxmoxNode()
 
 	if _, err := machineScope.ProxmoxClient().DeleteVM(ctx, node, vmID); err != nil {
@@ -52,6 +55,29 @@ func DeleteVM(ctx context.Context, machineScope *scope.MachineScope) error {
 		return err
 	}
 
+	return nil
+}
+
+// locateVMForDelete records the node the VM runs on now. Proxmox HA moves a
+// VM without CAPMOX, and on the node it left the VM "does not exist", which
+// DeleteVM reads as already deleted: it would drop the finalizer and leave
+// the VM running. A VMID no node lists, or one that names another VM, keeps
+// the recorded node, so the existing checks decide.
+func locateVMForDelete(ctx context.Context, machineScope *scope.MachineScope) error {
+	vmID := machineScope.ProxmoxMachine.GetVirtualMachineID()
+	if vmID < 100 {
+		return nil
+	}
+	rsc, err := machineScope.ProxmoxClient().FindVMResource(ctx, uint64(vmID))
+	if errors.Is(err, goproxmox.ErrVMNotListed) {
+		return nil
+	}
+	if err != nil {
+		return errors.Wrapf(err, "unable to locate vm %d before deleting it", vmID)
+	}
+	if rsc.Name == machineScope.ProxmoxMachine.GetName() && rsc.Node != "" {
+		machineScope.ProxmoxMachine.Status.ProxmoxNode = new(rsc.Node)
+	}
 	return nil
 }
 

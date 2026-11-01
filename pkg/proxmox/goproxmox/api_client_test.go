@@ -18,6 +18,7 @@ package goproxmox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"testing"
@@ -347,6 +348,8 @@ func TestProxmoxAPIClient_FindVMResource(t *testing.T) {
 			err: "cannot get cluster status: 500 Internal Server Error"},
 		{name: "resourcelisting broken", http: []int{200, 500}, vmID: 102, fails: true,
 			err: "could not list vm resources: 500 Internal Server Error"},
+		{name: "not listed", http: []int{200, 200}, vmID: 102, fails: true,
+			err: "unable to find VM with ID 102 on any of the nodes: VMID is not listed on any node"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -365,6 +368,7 @@ func TestProxmoxAPIClient_FindVMResource(t *testing.T) {
 			if test.fails {
 				require.Error(t, err)
 				require.Equal(t, test.err, err.Error())
+				require.Equal(t, test.name == "not listed", errors.Is(err, ErrVMNotListed))
 			} else {
 				require.NoError(t, err)
 				require.Equal(t, proxmox.ClusterResource{VMID: 101}, *clusterResource)

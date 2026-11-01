@@ -39,6 +39,9 @@ var _ capmox.Client = &APIClient{}
 // ErrVMIDFree is returned if the VMID is free.
 var ErrVMIDFree = errors.New("VMID is free")
 
+// ErrVMNotListed is returned if no node of the cluster lists the VMID.
+var ErrVMNotListed = errors.New("VMID is not listed on any node")
+
 // APIClient Proxmox API client object.
 type APIClient struct {
 	*proxmox.Client
@@ -142,7 +145,7 @@ func (c *APIClient) FindVMResource(ctx context.Context, vmID uint64) (*proxmox.C
 		}
 	}
 
-	return nil, fmt.Errorf("unable to find VM with ID %d on any of the nodes", vmID)
+	return nil, fmt.Errorf("unable to find VM with ID %d on any of the nodes: %w", vmID, ErrVMNotListed)
 }
 
 // FindVMTemplateByTags tries to find a VMID by its tags across the whole cluster.

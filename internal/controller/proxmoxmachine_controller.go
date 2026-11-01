@@ -54,6 +54,9 @@ type ProxmoxMachineReconciler struct {
 	Scheme        *runtime.Scheme
 	Recorder      record.EventRecorder
 	ProxmoxClient proxmox.Client
+	// LocationResync reconciles a ready ProxmoxMachine again after this long,
+	// so status.proxmoxNode follows a VM that Proxmox HA moved. Zero disables it.
+	LocationResync time.Duration
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -277,7 +280,7 @@ func (r *ProxmoxMachineReconciler) reconcileNormal(ctx context.Context, machineS
 	})
 	machineScope.Logger.Info("ProxmoxMachine is ready")
 
-	return reconcile.Result{}, nil
+	return reconcile.Result{RequeueAfter: r.LocationResync}, nil
 }
 
 func (r *ProxmoxMachineReconciler) getInfraCluster(ctx context.Context, logger *logr.Logger, cluster *clusterv1.Cluster, proxmoxMachine *infrav1.ProxmoxMachine) (*scope.ClusterScope, error) {
