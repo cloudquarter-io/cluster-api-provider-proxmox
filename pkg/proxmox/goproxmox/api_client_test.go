@@ -552,6 +552,32 @@ func TestProxmoxAPIClient_FindVMTemplateByTags(t *testing.T) {
 	}
 }
 
+func TestProxmoxAPIClient_DeleteVMStopsARunningVMFirst(t *testing.T) {
+	client := newTestClient(t)
+	upid := "UPID:test:000D6BDA:041E0A54:654A5A1D:qmstop:104:root@pam:"
+
+	httpmock.RegisterResponder(http.MethodGet, `=~/cluster/nextid`,
+		newJSONResponder(400, "VM 104 already exists"))
+	httpmock.RegisterResponder(http.MethodGet, `=~/nodes/test/status`,
+		newJSONResponder(200, proxmox.Node{Name: "test"}))
+	httpmock.RegisterResponder(http.MethodGet, `=~/nodes/test/qemu/104/status/current`,
+		newJSONResponder(200, proxmox.VirtualMachine{Node: "test", VMID: 104, Status: proxmox.StatusVirtualMachineRunning}))
+	httpmock.RegisterResponder(http.MethodGet, `=~/nodes/test/qemu/104/config`,
+		newJSONResponder(200, proxmox.VirtualMachineConfig{CPU: "kvm64"}))
+	httpmock.RegisterResponder(http.MethodPost, `=~/nodes/test/qemu/104/status/stop`,
+		newJSONResponder(200, upid))
+	httpmock.RegisterResponder(http.MethodDelete, `=~/nodes/test/qemu/104`,
+		newJSONResponder(200, upid))
+	httpmock.RegisterResponder(http.MethodGet, `=~/cluster/status`,
+		newJSONResponder(200, proxmox.NodeStatuses{{Name: "test"}}))
+
+	task, err := client.DeleteVM(context.Background(), "test", 104)
+
+	require.ErrorIs(t, err, ErrVMStopping)
+	require.Equal(t, "qmstop", task.Type)
+	require.Zero(t, httpmock.GetCallCountInfo()["DELETE =~/nodes/test/qemu/104"])
+}
+
 func TestProxmoxAPIClient_DeleteVM(t *testing.T) {
 	tests := []struct {
 		name  string

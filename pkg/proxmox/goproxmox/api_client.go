@@ -45,6 +45,10 @@ var ErrVMNotListed = errors.New("VMID is not listed on any node")
 // ErrVMNotOnNode is returned when a VMID in use cannot be read on the node addressed.
 var ErrVMNotOnNode = errors.New("VMID is in use but cannot be read on node")
 
+// ErrVMStopping is returned when DeleteVM stopped a running VM instead of
+// deleting it: Proxmox refuses to destroy a VM until its stop has finished.
+var ErrVMStopping = errors.New("VM is being stopped before its deletion")
+
 // APIClient Proxmox API client object.
 type APIClient struct {
 	*proxmox.Client
@@ -254,9 +258,11 @@ func (c *APIClient) DeleteVM(ctx context.Context, nodeName string, vmID int64) (
 	}
 
 	if vm.IsRunning() {
-		if _, err = vm.Stop(ctx); err != nil {
+		task, err := vm.Stop(ctx)
+		if err != nil {
 			return nil, fmt.Errorf("cannot stop vm id %d: %w", vmID, err)
 		}
+		return task, ErrVMStopping
 	}
 
 	task, err := vm.Delete(ctx, nil)
