@@ -39,6 +39,12 @@ var _ capmox.Client = &APIClient{}
 // ErrVMIDFree is returned if the VMID is free.
 var ErrVMIDFree = errors.New("VMID is free")
 
+// ErrVMNotListed is returned if no node of the cluster lists the VMID.
+var ErrVMNotListed = errors.New("VMID is not listed on any node")
+
+// ErrVMNotOnNode is returned when a VMID in use cannot be read on the node addressed.
+var ErrVMNotOnNode = errors.New("VMID is in use but cannot be read on node")
+
 // APIClient Proxmox API client object.
 type APIClient struct {
 	*proxmox.Client
@@ -142,7 +148,7 @@ func (c *APIClient) FindVMResource(ctx context.Context, vmID uint64) (*proxmox.C
 		}
 	}
 
-	return nil, fmt.Errorf("unable to find VM with ID %d on any of the nodes", vmID)
+	return nil, fmt.Errorf("unable to find VM with ID %d on any of the nodes: %w", vmID, ErrVMNotListed)
 }
 
 // FindVMTemplateByTags tries to find a VMID by its tags across the whole cluster.
@@ -242,7 +248,9 @@ func (c *APIClient) DeleteVM(ctx context.Context, nodeName string, vmID int64) (
 
 	vm, err := node.VirtualMachine(ctx, int(vmID))
 	if err != nil {
-		return nil, fmt.Errorf("cannot find vm with id %d: %w", vmID, err)
+		// The VMID is in use: a VM that just migrated off this node is not
+		// deleted, so callers test ErrVMNotOnNode before "does not exist".
+		return nil, fmt.Errorf("vm with id %d: %w %s: %w", vmID, ErrVMNotOnNode, nodeName, err)
 	}
 
 	if vm.IsRunning() {

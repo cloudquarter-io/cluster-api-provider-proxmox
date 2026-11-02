@@ -208,19 +208,21 @@ func ensureVirtualMachine(ctx context.Context, machineScope *scope.MachineScope)
 
 	// Before going further, we need the VM's managed object reference.
 	vmRef, err := FindVM(ctx, machineScope)
+	if errors.Is(err, ErrVMNotFound) {
+		if locationErr := updateVMLocation(ctx, machineScope); locationErr != nil {
+			if errors.Is(locationErr, ErrVMIDCollision) {
+				return false, recoverFromVMIDCollision(machineScope, locationErr)
+			}
+			return false, errors.Wrap(locationErr, "error trying to locate vm")
+		}
+		// Proxmox HA moves a VM without CAPMOX: look it up on the node just recorded.
+		vmRef, err = FindVM(ctx, machineScope)
+	}
 
 	// TODO: Codeflow
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrVMNotFound):
-			if locationErr := updateVMLocation(ctx, machineScope); locationErr != nil {
-				if errors.Is(locationErr, ErrVMIDCollision) {
-					return false, recoverFromVMIDCollision(machineScope, locationErr)
-				}
-				return false, errors.Wrap(locationErr, "error trying to locate vm")
-			}
-
-			// we always want to trigger reconciliation at this point.
 			return false, err
 		case errors.Is(err, ErrVMIDCollision):
 			return false, recoverFromVMIDCollision(machineScope, err)

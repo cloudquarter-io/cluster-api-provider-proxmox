@@ -25,6 +25,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
@@ -54,6 +55,9 @@ type ProxmoxMachineReconciler struct {
 	Scheme        *runtime.Scheme
 	Recorder      record.EventRecorder
 	ProxmoxClient proxmox.Client
+	// LocationResync reconciles a ready ProxmoxMachine again after this long,
+	// so status.proxmoxNode follows a VM that Proxmox HA moved. Zero disables it.
+	LocationResync time.Duration
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -269,15 +273,23 @@ func (r *ProxmoxMachineReconciler) reconcileNormal(ctx context.Context, machineS
 		ptr.Deref(machineScope.Zone(), infrav1.DefaultZone)
 	machineScope.ProxmoxMachine.SetLabels(labels)
 
+	if !ptr.Deref(machineScope.ProxmoxMachine.Status.Initialization.Provisioned, false) {
+		machineScope.Logger.Info("ProxmoxMachine is ready")
+	}
 	machineScope.SetReady()
 	conditions.Set(machineScope.ProxmoxMachine, metav1.Condition{
 		Type:   infrav1.ProxmoxMachineVirtualMachineProvisionedCondition,
 		Status: metav1.ConditionTrue,
 		Reason: clusterv1.ProvisionedReason,
 	})
-	machineScope.Logger.Info("ProxmoxMachine is ready")
 
-	return reconcile.Result{}, nil
+	return r.readyResult(), nil
+}
+
+// readyResult requeues a ready machine after LocationResync, jittered so
+// machines readied together do not poll Proxmox in lockstep.
+func (r *ProxmoxMachineReconciler) readyResult() reconcile.Result {
+	return reconcile.Result{RequeueAfter: wait.Jitter(r.LocationResync, 0.2)}
 }
 
 func (r *ProxmoxMachineReconciler) getInfraCluster(ctx context.Context, logger *logr.Logger, cluster *clusterv1.Cluster, proxmoxMachine *infrav1.ProxmoxMachine) (*scope.ClusterScope, error) {

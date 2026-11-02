@@ -48,6 +48,7 @@ spec:
         - "--diagnostics-address=${CAPI_DIAGNOSTICS_ADDRESS:=:8443}"
         - "--insecure-diagnostics=${CAPI_INSECURE_DIAGNOSTICS:=false}"
         - "--v=${CAPMOX_LOGLEVEL:=0}"
+        - "--machine-location-resync=${CAPMOX_MACHINE_LOCATION_RESYNC:=60s}"
         image: controller:latest
         name: manager
         securityContext:

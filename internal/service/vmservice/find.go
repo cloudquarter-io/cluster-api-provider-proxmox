@@ -65,7 +65,7 @@ func FindVM(ctx context.Context, scope *scope.MachineScope) (*proxmox.VirtualMac
 
 		vm, err := scope.ProxmoxClient().GetVM(ctx, node, vmID)
 		if err != nil {
-			scope.Error(err, "unable to find vm")
+			scope.V(2).Info("vm not found on its recorded node", "node", node, "error", err.Error())
 			return nil, ErrVMNotFound
 		}
 		if vm.Name == "" || vm.Name == placeholderVMName(vmID) {

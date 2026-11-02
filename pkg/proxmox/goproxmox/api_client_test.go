@@ -18,6 +18,7 @@ package goproxmox
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"testing"
@@ -347,6 +348,8 @@ func TestProxmoxAPIClient_FindVMResource(t *testing.T) {
 			err: "cannot get cluster status: 500 Internal Server Error"},
 		{name: "resourcelisting broken", http: []int{200, 500}, vmID: 102, fails: true,
 			err: "could not list vm resources: 500 Internal Server Error"},
+		{name: "not listed", http: []int{200, 200}, vmID: 102, fails: true,
+			err: "unable to find VM with ID 102 on any of the nodes: VMID is not listed on any node"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -365,6 +368,7 @@ func TestProxmoxAPIClient_FindVMResource(t *testing.T) {
 			if test.fails {
 				require.Error(t, err)
 				require.Equal(t, test.err, err.Error())
+				require.Equal(t, test.name == "not listed", errors.Is(err, ErrVMNotListed))
 			} else {
 				require.NoError(t, err)
 				require.Equal(t, proxmox.ClusterResource{VMID: 101}, *clusterResource)
@@ -561,6 +565,8 @@ func TestProxmoxAPIClient_DeleteVM(t *testing.T) {
 			err: "cannot find node with name enoent: 500 Internal Server Error"},
 		{name: "delete fails", node: "test", vmID: 102, fails: true,
 			err: "cannot delete vm with id 102: not authorized to access endpoint"},
+		{name: "in use on another node", node: "test", vmID: 103, fails: true,
+			err: "vm with id 103: VMID is in use but cannot be read on node test: 500 Internal Server Error"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -579,6 +585,8 @@ func TestProxmoxAPIClient_DeleteVM(t *testing.T) {
 				newJSONResponder(200, proxmox.VirtualMachine{Node: "test", VMID: 101}))
 			httpmock.RegisterResponder(http.MethodGet, `=~/nodes/test/qemu/102/status/current`,
 				newJSONResponder(200, proxmox.VirtualMachine{Node: "test", VMID: 102}))
+			httpmock.RegisterResponder(http.MethodGet, `=~/nodes/test/qemu/103/status/current`,
+				newJSONResponder(500, "Configuration file 'nodes/test/qemu-server/103.conf' does not exist"))
 			httpmock.RegisterResponder(http.MethodDelete, `=~/nodes/test/qemu/101`,
 				newJSONResponder(200, upid))
 			httpmock.RegisterResponder(http.MethodDelete, `=~/nodes/test/qemu/102`,

@@ -278,6 +278,14 @@ volumes:
 ```
 
 
+## VMs moved by Proxmox HA
+
+Proxmox HA restarts or migrates a VM without CAPMOX. A ready ProxmoxMachine is
+reconciled again every `--machine-location-resync` (default
+`${CAPMOX_MACHINE_LOCATION_RESYNC:=60s}`), so `status.proxmoxNode` names the
+node the VM runs on now; `0` disables it. Deleting a machine finds its VM by
+VMID wherever it runs.
+
 ## Failure Domains (Zone-Based Placement)
 
 CAPMOX zones can be mapped to CAPI failure domains, enabling KubeadmControlPlane

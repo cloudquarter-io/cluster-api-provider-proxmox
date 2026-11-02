@@ -77,8 +77,9 @@ var (
 	// ProxmoxSecret env variable that defines the Proxmox secret for the given token id.
 	ProxmoxSecret string
 
-	proxmoxInsecure     bool
-	proxmoxRootCertFile string
+	proxmoxInsecure       bool
+	proxmoxRootCertFile   string
+	machineLocationResync time.Duration
 )
 
 func init() {
@@ -199,10 +200,11 @@ func setupReconcilers(ctx context.Context, mgr ctrl.Manager, proxmoxClient capmo
 		return fmt.Errorf("setting up ProxmoxCluster controller: %w", err)
 	}
 	if err := (&controller.ProxmoxMachineReconciler{
-		Client:        mgr.GetClient(),
-		Scheme:        mgr.GetScheme(),
-		Recorder:      mgr.GetEventRecorderFor("proxmoxmachine-controller"),
-		ProxmoxClient: proxmoxClient,
+		Client:         mgr.GetClient(),
+		Scheme:         mgr.GetScheme(),
+		Recorder:       mgr.GetEventRecorderFor("proxmoxmachine-controller"),
+		ProxmoxClient:  proxmoxClient,
+		LocationResync: machineLocationResync,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setting up ProxmoxMachine controller: %w", err)
 	}
@@ -278,6 +280,8 @@ func initFlagsAndEnv(fs *pflag.FlagSet) {
 		"Duration the LeaderElector clients should wait between tries of actions (duration string)")
 	fs.BoolVar(&enableWebhooks, "enable-webhooks", true,
 		"If true, run webhook server alongside manager")
+	fs.DurationVar(&machineLocationResync, "machine-location-resync", 0,
+		"Interval at which a ready ProxmoxMachine is reconciled again, so status.proxmoxNode follows a VM that Proxmox HA moved; 0 disables it (duration string)")
 
 	flags.AddManagerOptions(fs, &managerOptions)
 
