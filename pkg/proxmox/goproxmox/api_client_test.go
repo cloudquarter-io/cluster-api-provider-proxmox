@@ -566,7 +566,7 @@ func TestProxmoxAPIClient_DeleteVM(t *testing.T) {
 		{name: "delete fails", node: "test", vmID: 102, fails: true,
 			err: "cannot delete vm with id 102: not authorized to access endpoint"},
 		{name: "in use on another node", node: "test", vmID: 103, fails: true,
-			err: "vm with id 103 is in use but cannot be read on node test: VMID is in use on another node"},
+			err: "vm with id 103: VMID is in use but cannot be read on node test: 500 Internal Server Error"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

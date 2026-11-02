@@ -97,16 +97,61 @@ func TestDeleteVM_LeavesAVMIDThatNamesAContainer(t *testing.T) {
 	require.Empty(t, machineScope.ProxmoxMachine.Finalizers)
 }
 
-func TestDeleteVM_RetriesAVMIDInUseOnAnotherNode(t *testing.T) {
+func TestDeleteVM_ReleasesAnUnlistedVMIDInUseElsewhere(t *testing.T) {
 	machineScope, proxmoxClient, _ := setupReconcilerTest(t)
 	machineScope.ProxmoxMachine.Spec.VirtualMachineID = new(int64(123))
 	machineScope.ProxmoxMachine.Finalizers = []string{infrav1.MachineFinalizer}
 
 	proxmoxClient.EXPECT().FindVMResource(context.TODO(), uint64(123)).Return(nil, fmt.Errorf("unable to find VM: %w", goproxmox.ErrVMNotListed)).Once()
-	proxmoxClient.EXPECT().DeleteVM(context.TODO(), "node1", int64(123)).Return(nil, fmt.Errorf("vm with id 123 is in use but cannot be read on node node1: %w", goproxmox.ErrVMNotOnNode)).Once()
+	proxmoxClient.EXPECT().DeleteVM(context.TODO(), "node1", int64(123)).Return(nil, fmt.Errorf("vm with id 123: %w node1: %w", goproxmox.ErrVMNotOnNode, errors.New("does not exist"))).Once()
+
+	require.NoError(t, DeleteVM(context.TODO(), machineScope))
+	require.Empty(t, machineScope.ProxmoxMachine.Finalizers)
+}
+
+func TestDeleteVM_RetriesWhenOurVMMovesDuringTheDelete(t *testing.T) {
+	machineScope, proxmoxClient, _ := setupReconcilerTest(t)
+	machineScope.ProxmoxMachine.Spec.VirtualMachineID = new(int64(123))
+	machineScope.ProxmoxMachine.Finalizers = []string{infrav1.MachineFinalizer}
+	listed := newVMResource()
+	listed.Node = movedNode
+
+	proxmoxClient.EXPECT().FindVMResource(context.TODO(), uint64(123)).Return(listed, nil).Once()
+	proxmoxClient.EXPECT().GetVM(context.TODO(), movedNode, int64(123)).Return(namedVM("test"), nil).Once()
+	proxmoxClient.EXPECT().DeleteVM(context.TODO(), movedNode, int64(123)).Return(nil, fmt.Errorf("vm with id 123: %w %s: %w", goproxmox.ErrVMNotOnNode, movedNode, errors.New("does not exist"))).Once()
 
 	require.Error(t, DeleteVM(context.TODO(), machineScope))
 	require.Equal(t, []string{infrav1.MachineFinalizer}, machineScope.ProxmoxMachine.Finalizers)
+}
+
+func TestDeleteVM_DecidesOwnershipByTheRecordedProviderID(t *testing.T) {
+	const ours, theirs = "uuid=56603c36-46b9-4608-90ae-c731c15eae64", "uuid=0f8fad5b-d9cb-469f-a165-70867728950e"
+	for _, tc := range []struct {
+		smbios, name string
+		deleted      bool
+	}{
+		{smbios: ours, name: "renamed-by-hand", deleted: true},
+		{smbios: theirs, name: "", deleted: false},
+		{smbios: theirs, name: "test", deleted: false},
+	} {
+		machineScope, proxmoxClient, _ := setupReconcilerTest(t)
+		machineScope.ProxmoxMachine.Spec.VirtualMachineID = new(int64(123))
+		machineScope.SetProviderID("56603c36-46b9-4608-90ae-c731c15eae64")
+		machineScope.ProxmoxMachine.Finalizers = []string{infrav1.MachineFinalizer}
+		listed := newVMResource()
+		listed.Node = movedNode
+		vm := namedVM(tc.name)
+		vm.VirtualMachineConfig.SMBios1 = tc.smbios
+
+		proxmoxClient.EXPECT().FindVMResource(context.TODO(), uint64(123)).Return(listed, nil).Once()
+		proxmoxClient.EXPECT().GetVM(context.TODO(), movedNode, int64(123)).Return(vm, nil).Once()
+		if tc.deleted {
+			proxmoxClient.EXPECT().DeleteVM(context.TODO(), movedNode, int64(123)).Return(&proxmox.Task{}, nil).Once()
+		}
+
+		require.NoError(t, DeleteVM(context.TODO(), machineScope), tc.smbios)
+		require.Equal(t, tc.deleted, len(machineScope.ProxmoxMachine.Finalizers) == 1, tc.smbios)
+	}
 }
 
 func TestDeleteVM_TrustsTheVMConfigOverAStaleListingName(t *testing.T) {
