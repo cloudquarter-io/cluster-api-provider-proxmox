@@ -91,6 +91,10 @@ func locateVMForDelete(ctx context.Context, machineScope *scope.MachineScope) (g
 	if rsc.Node == "" {
 		return false, nil
 	}
+	if rsc.Type == "lxc" {
+		machineScope.Info("vmid now names a container; leaving it", "vmID", vmID, "node", rsc.Node)
+		return true, nil
+	}
 	vm, err := machineScope.ProxmoxClient().GetVM(ctx, rsc.Node, vmID)
 	if err != nil {
 		return false, errors.Wrapf(err, "unable to read vm %d on node %s before deleting it", vmID, rsc.Node)

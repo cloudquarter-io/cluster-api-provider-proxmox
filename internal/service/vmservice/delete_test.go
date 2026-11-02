@@ -83,6 +83,32 @@ func TestDeleteVM_LeavesAVMIDThatNamesAnotherVM(t *testing.T) {
 	require.Empty(t, machineScope.ProxmoxMachine.Finalizers)
 }
 
+func TestDeleteVM_LeavesAVMIDThatNamesAContainer(t *testing.T) {
+	machineScope, proxmoxClient, _ := setupReconcilerTest(t)
+	machineScope.ProxmoxMachine.Spec.VirtualMachineID = new(int64(123))
+	machineScope.ProxmoxMachine.Finalizers = []string{infrav1.MachineFinalizer}
+	container := newVMResource()
+	container.Type = "lxc"
+	container.Node = movedNode
+
+	proxmoxClient.EXPECT().FindVMResource(context.TODO(), uint64(123)).Return(container, nil).Once()
+
+	require.NoError(t, DeleteVM(context.TODO(), machineScope))
+	require.Empty(t, machineScope.ProxmoxMachine.Finalizers)
+}
+
+func TestDeleteVM_RetriesAVMIDInUseOnAnotherNode(t *testing.T) {
+	machineScope, proxmoxClient, _ := setupReconcilerTest(t)
+	machineScope.ProxmoxMachine.Spec.VirtualMachineID = new(int64(123))
+	machineScope.ProxmoxMachine.Finalizers = []string{infrav1.MachineFinalizer}
+
+	proxmoxClient.EXPECT().FindVMResource(context.TODO(), uint64(123)).Return(nil, fmt.Errorf("unable to find VM: %w", goproxmox.ErrVMNotListed)).Once()
+	proxmoxClient.EXPECT().DeleteVM(context.TODO(), "node1", int64(123)).Return(nil, fmt.Errorf("vm with id 123 is in use but cannot be read on node node1: %w", goproxmox.ErrVMNotOnNode)).Once()
+
+	require.Error(t, DeleteVM(context.TODO(), machineScope))
+	require.Equal(t, []string{infrav1.MachineFinalizer}, machineScope.ProxmoxMachine.Finalizers)
+}
+
 func TestDeleteVM_TrustsTheVMConfigOverAStaleListingName(t *testing.T) {
 	machineScope, proxmoxClient, _ := setupReconcilerTest(t)
 	machineScope.ProxmoxMachine.Spec.VirtualMachineID = new(int64(123))

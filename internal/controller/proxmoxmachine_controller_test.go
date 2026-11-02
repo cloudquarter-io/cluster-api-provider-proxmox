@@ -18,6 +18,7 @@ package controller
 
 import (
 	"context"
+	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
@@ -51,6 +52,18 @@ var _ = Describe("ProxmoxMachineReconciler", func() {
 			})
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.RequeueAfter).To(BeZero())
+		})
+	})
+
+	Context("Requeue a ready ProxmoxMachine", func() {
+		It("should requeue after the jittered location resync, and never when it is zero", func() {
+			Expect((&ProxmoxMachineReconciler{}).readyResult().RequeueAfter).To(BeZero())
+			resync := time.Minute
+			for range 20 {
+				after := (&ProxmoxMachineReconciler{LocationResync: resync}).readyResult().RequeueAfter
+				Expect(after).To(BeNumerically(">=", resync))
+				Expect(after).To(BeNumerically("<=", resync+resync/5))
+			}
 		})
 	})
 })

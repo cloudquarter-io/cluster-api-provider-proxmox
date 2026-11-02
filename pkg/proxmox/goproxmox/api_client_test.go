@@ -565,6 +565,8 @@ func TestProxmoxAPIClient_DeleteVM(t *testing.T) {
 			err: "cannot find node with name enoent: 500 Internal Server Error"},
 		{name: "delete fails", node: "test", vmID: 102, fails: true,
 			err: "cannot delete vm with id 102: not authorized to access endpoint"},
+		{name: "in use on another node", node: "test", vmID: 103, fails: true,
+			err: "vm with id 103 is in use but cannot be read on node test: VMID is in use on another node"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -583,6 +585,8 @@ func TestProxmoxAPIClient_DeleteVM(t *testing.T) {
 				newJSONResponder(200, proxmox.VirtualMachine{Node: "test", VMID: 101}))
 			httpmock.RegisterResponder(http.MethodGet, `=~/nodes/test/qemu/102/status/current`,
 				newJSONResponder(200, proxmox.VirtualMachine{Node: "test", VMID: 102}))
+			httpmock.RegisterResponder(http.MethodGet, `=~/nodes/test/qemu/103/status/current`,
+				newJSONResponder(500, "Configuration file 'nodes/test/qemu-server/103.conf' does not exist"))
 			httpmock.RegisterResponder(http.MethodDelete, `=~/nodes/test/qemu/101`,
 				newJSONResponder(200, upid))
 			httpmock.RegisterResponder(http.MethodDelete, `=~/nodes/test/qemu/102`,

@@ -42,6 +42,9 @@ var ErrVMIDFree = errors.New("VMID is free")
 // ErrVMNotListed is returned if no node of the cluster lists the VMID.
 var ErrVMNotListed = errors.New("VMID is not listed on any node")
 
+// ErrVMNotOnNode is returned when a VMID in use cannot be read on the node addressed.
+var ErrVMNotOnNode = errors.New("VMID is in use on another node")
+
 // APIClient Proxmox API client object.
 type APIClient struct {
 	*proxmox.Client
@@ -245,7 +248,9 @@ func (c *APIClient) DeleteVM(ctx context.Context, nodeName string, vmID int64) (
 
 	vm, err := node.VirtualMachine(ctx, int(vmID))
 	if err != nil {
-		return nil, fmt.Errorf("cannot find vm with id %d: %w", vmID, err)
+		// The VMID is in use: a VM that just migrated off this node is not
+		// deleted, so the message must not read as "does not exist".
+		return nil, fmt.Errorf("vm with id %d is in use but cannot be read on node %s: %w", vmID, nodeName, ErrVMNotOnNode)
 	}
 
 	if vm.IsRunning() {

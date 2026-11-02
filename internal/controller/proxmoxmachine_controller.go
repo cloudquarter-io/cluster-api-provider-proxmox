@@ -283,8 +283,13 @@ func (r *ProxmoxMachineReconciler) reconcileNormal(ctx context.Context, machineS
 		Reason: clusterv1.ProvisionedReason,
 	})
 
-	// Jitter spreads the passes so machines readied together do not poll Proxmox in lockstep.
-	return reconcile.Result{RequeueAfter: wait.Jitter(r.LocationResync, 0.2)}, nil
+	return r.readyResult(), nil
+}
+
+// readyResult requeues a ready machine after LocationResync, jittered so
+// machines readied together do not poll Proxmox in lockstep.
+func (r *ProxmoxMachineReconciler) readyResult() reconcile.Result {
+	return reconcile.Result{RequeueAfter: wait.Jitter(r.LocationResync, 0.2)}
 }
 
 func (r *ProxmoxMachineReconciler) getInfraCluster(ctx context.Context, logger *logr.Logger, cluster *clusterv1.Cluster, proxmoxMachine *infrav1.ProxmoxMachine) (*scope.ClusterScope, error) {
