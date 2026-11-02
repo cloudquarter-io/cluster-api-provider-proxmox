@@ -25,6 +25,7 @@ import (
 	"github.com/luthermonson/go-proxmox"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/cluster-api/util/conditions"
 
 	infrav1 "github.com/ionos-cloud/cluster-api-provider-proxmox/api/v1alpha2"
 	"github.com/ionos-cloud/cluster-api-provider-proxmox/pkg/proxmox/goproxmox"
@@ -206,6 +207,21 @@ func TestDeleteVM_DeletesAPlaceholderOrUnnamedVMWhereItIsListed(t *testing.T) {
 		require.NoError(t, DeleteVM(context.TODO(), machineScope), name)
 		require.Equal(t, movedNode, *machineScope.ProxmoxMachine.Status.ProxmoxNode, name)
 	}
+}
+
+func TestDeleteVM_WaitsForARunningVMToStop(t *testing.T) {
+	machineScope, proxmoxClient, _ := setupReconcilerTest(t)
+	machineScope.ProxmoxMachine.Spec.VirtualMachineID = new(int64(123))
+	machineScope.ProxmoxMachine.Status.ProxmoxNode = new("node1")
+	machineScope.ProxmoxMachine.Finalizers = []string{infrav1.MachineFinalizer}
+
+	proxmoxClient.EXPECT().FindVMResource(context.TODO(), uint64(123)).Return(newVMResource(), nil).Once()
+	proxmoxClient.EXPECT().GetVM(context.TODO(), "node1", int64(123)).Return(namedVM("test"), nil).Once()
+	proxmoxClient.EXPECT().DeleteVM(context.TODO(), "node1", int64(123)).Return(&proxmox.Task{}, goproxmox.ErrVMStopping).Once()
+
+	require.NoError(t, DeleteVM(context.TODO(), machineScope))
+	require.Equal(t, []string{infrav1.MachineFinalizer}, machineScope.ProxmoxMachine.Finalizers)
+	require.Nil(t, conditions.Get(machineScope.ProxmoxMachine, infrav1.ProxmoxMachineVirtualMachineProvisionedCondition))
 }
 
 func TestDeleteVM_KeepsTheRecordedNodeWhenTheListingNamesNone(t *testing.T) {

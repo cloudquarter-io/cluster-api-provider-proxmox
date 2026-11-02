@@ -45,6 +45,11 @@ func DeleteVM(ctx context.Context, machineScope *scope.MachineScope) error {
 			if where == vmUnlisted && errors.Is(err, goproxmox.ErrVMNotOnNode) {
 				err = goproxmox.ErrVMIDFree
 			}
+			// The next reconcile deletes the VM once its stop has finished.
+			if errors.Is(err, goproxmox.ErrVMStopping) {
+				machineScope.Info("stopping vm before deleting it", "vmID", vmID)
+				return nil
+			}
 		}
 	}
 	if err != nil {
