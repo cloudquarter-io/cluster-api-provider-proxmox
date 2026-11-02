@@ -272,13 +272,15 @@ func (r *ProxmoxMachineReconciler) reconcileNormal(ctx context.Context, machineS
 		ptr.Deref(machineScope.Zone(), infrav1.DefaultZone)
 	machineScope.ProxmoxMachine.SetLabels(labels)
 
+	if !ptr.Deref(machineScope.ProxmoxMachine.Status.Initialization.Provisioned, false) {
+		machineScope.Logger.Info("ProxmoxMachine is ready")
+	}
 	machineScope.SetReady()
 	conditions.Set(machineScope.ProxmoxMachine, metav1.Condition{
 		Type:   infrav1.ProxmoxMachineVirtualMachineProvisionedCondition,
 		Status: metav1.ConditionTrue,
 		Reason: clusterv1.ProvisionedReason,
 	})
-	machineScope.Logger.Info("ProxmoxMachine is ready")
 
 	return reconcile.Result{RequeueAfter: r.LocationResync}, nil
 }

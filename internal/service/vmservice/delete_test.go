@@ -66,19 +66,59 @@ func TestDeleteVM_DeletesOnTheNodeTheVMMovedTo(t *testing.T) {
 	require.Equal(t, []string{infrav1.MachineFinalizer}, machineScope.ProxmoxMachine.Finalizers)
 }
 
-func TestDeleteVM_KeepsTheRecordedNodeWhenTheVMIDNamesAnotherVM(t *testing.T) {
+func TestDeleteVM_LeavesAVMIDThatNamesAnotherVM(t *testing.T) {
 	machineScope, proxmoxClient, _ := setupReconcilerTest(t)
 	machineScope.ProxmoxMachine.Spec.VirtualMachineID = new(int64(123))
 	machineScope.ProxmoxMachine.Status.ProxmoxNode = new("node1")
+	machineScope.ProxmoxMachine.Finalizers = []string{infrav1.MachineFinalizer}
 	other := newVMResource()
 	other.Name = "other"
 	other.Node = movedNode
 
 	proxmoxClient.EXPECT().FindVMResource(context.TODO(), uint64(123)).Return(other, nil).Once()
+
+	require.NoError(t, DeleteVM(context.TODO(), machineScope))
+	require.Empty(t, machineScope.ProxmoxMachine.Finalizers)
+}
+
+func TestDeleteVM_KeepsTheRecordedNodeForAPlaceholderOrUnnamedVM(t *testing.T) {
+	for _, name := range []string{"VM 123", ""} {
+		machineScope, proxmoxClient, _ := setupReconcilerTest(t)
+		machineScope.ProxmoxMachine.Spec.VirtualMachineID = new(int64(123))
+		machineScope.ProxmoxMachine.Status.ProxmoxNode = new("node1")
+		cloning := newVMResource()
+		cloning.Name = name
+		cloning.Node = movedNode
+
+		proxmoxClient.EXPECT().FindVMResource(context.TODO(), uint64(123)).Return(cloning, nil).Once()
+		proxmoxClient.EXPECT().DeleteVM(context.TODO(), "node1", int64(123)).Return(&proxmox.Task{}, nil).Once()
+
+		require.NoError(t, DeleteVM(context.TODO(), machineScope), name)
+		require.Equal(t, "node1", *machineScope.ProxmoxMachine.Status.ProxmoxNode, name)
+	}
+}
+
+func TestDeleteVM_KeepsTheRecordedNodeWhenTheListingNamesNone(t *testing.T) {
+	machineScope, proxmoxClient, _ := setupReconcilerTest(t)
+	machineScope.ProxmoxMachine.Spec.VirtualMachineID = new(int64(123))
+	machineScope.ProxmoxMachine.Status.ProxmoxNode = new("node1")
+	listed := newVMResource()
+	listed.Node = ""
+
+	proxmoxClient.EXPECT().FindVMResource(context.TODO(), uint64(123)).Return(listed, nil).Once()
 	proxmoxClient.EXPECT().DeleteVM(context.TODO(), "node1", int64(123)).Return(&proxmox.Task{}, nil).Once()
 
 	require.NoError(t, DeleteVM(context.TODO(), machineScope))
 	require.Equal(t, "node1", *machineScope.ProxmoxMachine.Status.ProxmoxNode)
+}
+
+func TestDeleteVM_WithoutAVMIDLocatesNothing(t *testing.T) {
+	machineScope, proxmoxClient, _ := setupReconcilerTest(t)
+
+	proxmoxClient.EXPECT().DeleteVM(context.TODO(), "node1", int64(-1)).Return(nil, errors.New("vm with id -1 does not exist")).Once()
+
+	require.NoError(t, DeleteVM(context.TODO(), machineScope))
+	proxmoxClient.AssertNotCalled(t, "FindVMResource", context.TODO(), uint64(18446744073709551615))
 }
 
 func TestDeleteVM_RetriesWhenTheVMCannotBeLocated(t *testing.T) {
@@ -90,4 +130,5 @@ func TestDeleteVM_RetriesWhenTheVMCannotBeLocated(t *testing.T) {
 
 	require.Error(t, DeleteVM(context.TODO(), machineScope))
 	require.Equal(t, []string{infrav1.MachineFinalizer}, machineScope.ProxmoxMachine.Finalizers)
+	requireConditionIsFalse(t, machineScope.ProxmoxMachine, infrav1.ProxmoxMachineVirtualMachineProvisionedCondition)
 }

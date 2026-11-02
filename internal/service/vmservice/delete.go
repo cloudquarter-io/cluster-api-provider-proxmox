@@ -34,12 +34,23 @@ import (
 // DeleteVM implements the logic of destroying a VM.
 func DeleteVM(ctx context.Context, machineScope *scope.MachineScope) error {
 	vmID := machineScope.ProxmoxMachine.GetVirtualMachineID()
-	if err := locateVMForDelete(ctx, machineScope); err != nil {
+	gone, err := locateVMForDelete(ctx, machineScope)
+	if err != nil {
+		conditions.Set(machineScope.ProxmoxMachine, metav1.Condition{
+			Type:   infrav1.ProxmoxMachineVirtualMachineProvisionedCondition,
+			Status: metav1.ConditionFalse,
+			Reason: infrav1.ProxmoxMachineVirtualMachineProvisionedDeletionFailedReason,
+		})
 		return err
 	}
 	node := machineScope.LocateProxmoxNode()
 
-	if _, err := machineScope.ProxmoxClient().DeleteVM(ctx, node, vmID); err != nil {
+	if gone {
+		err = goproxmox.ErrVMIDFree
+	} else {
+		_, err = machineScope.ProxmoxClient().DeleteVM(ctx, node, vmID)
+	}
+	if err != nil {
 		if VMNotFound(err) || errors.Is(err, goproxmox.ErrVMIDFree) {
 			// remove machine from cluster status
 			machineScope.InfraCluster.ProxmoxCluster.RemoveNodeLocation(machineScope.Name(), util.IsControlPlaneMachine(machineScope.Machine))
@@ -61,24 +72,31 @@ func DeleteVM(ctx context.Context, machineScope *scope.MachineScope) error {
 // locateVMForDelete records the node the VM runs on now. Proxmox HA moves a
 // VM without CAPMOX, and on the node it left the VM "does not exist", which
 // DeleteVM reads as already deleted: it would drop the finalizer and leave
-// the VM running. A VMID no node lists, or one that names another VM, keeps
-// the recorded node, so the existing checks decide.
-func locateVMForDelete(ctx context.Context, machineScope *scope.MachineScope) error {
+// the VM running. It reports the VM gone when its VMID now names another VM,
+// which must not be deleted. A VMID no node lists, or one still carrying a
+// clone's placeholder name, keeps the recorded node.
+func locateVMForDelete(ctx context.Context, machineScope *scope.MachineScope) (gone bool, err error) {
 	vmID := machineScope.ProxmoxMachine.GetVirtualMachineID()
 	if vmID < 100 {
-		return nil
+		return false, nil
 	}
 	rsc, err := machineScope.ProxmoxClient().FindVMResource(ctx, uint64(vmID))
 	if errors.Is(err, goproxmox.ErrVMNotListed) {
-		return nil
+		return false, nil
 	}
 	if err != nil {
-		return errors.Wrapf(err, "unable to locate vm %d before deleting it", vmID)
+		return false, errors.Wrapf(err, "unable to locate vm %d before deleting it", vmID)
 	}
-	if rsc.Name == machineScope.ProxmoxMachine.GetName() && rsc.Node != "" {
-		machineScope.ProxmoxMachine.Status.ProxmoxNode = new(rsc.Node)
+	switch rsc.Name {
+	case machineScope.ProxmoxMachine.GetName():
+		if rsc.Node != "" {
+			machineScope.ProxmoxMachine.Status.ProxmoxNode = new(rsc.Node)
+		}
+		return false, nil
+	case "", placeholderVMName(vmID):
+		return false, nil
 	}
-	return nil
+	return true, nil
 }
 
 // VMNotFound checks if the given err is related to that the VM is not found in Proxmox.

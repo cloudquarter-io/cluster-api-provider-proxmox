@@ -453,6 +453,26 @@ func TestEnsureVirtualMachine_FindVM(t *testing.T) {
 	require.Equal(t, "proxmox://56603c36-46b9-4608-90ae-c731c15eae64", machineScope.GetProviderID())
 }
 
+func TestEnsureVirtualMachine_FindsAVMProxmoxHAMoved(t *testing.T) {
+	machineScope, proxmoxClient, _ := setupReconcilerTestWithCondition(t, infrav1.ProxmoxMachineVirtualMachineProvisionedCloningReason)
+	machineScope.SetVirtualMachineID(123)
+	machineScope.ProxmoxMachine.Status.ProxmoxNode = new("node1")
+	moved := newRunningVM()
+	moved.Node = movedNode
+	resource := newVMResource()
+	resource.Node = movedNode
+
+	proxmoxClient.EXPECT().GetVM(context.Background(), "node1", int64(123)).Return(nil, fmt.Errorf("does not exist")).Once()
+	proxmoxClient.EXPECT().FindVMResource(context.Background(), uint64(123)).Return(resource, nil).Once()
+	proxmoxClient.EXPECT().GetVM(context.Background(), movedNode, int64(123)).Return(moved, nil).Twice()
+
+	requeue, err := ensureVirtualMachine(context.Background(), machineScope)
+	require.NoError(t, err)
+	require.False(t, requeue)
+	require.Equal(t, movedNode, *machineScope.ProxmoxMachine.Status.ProxmoxNode)
+	require.Equal(t, moved, machineScope.VirtualMachine)
+}
+
 func TestEnsureVirtualMachine_UpdateVMLocation_Error(t *testing.T) {
 	machineScope, proxmoxClient, _ := setupReconcilerTestWithCondition(t, infrav1.ProxmoxMachineVirtualMachineProvisionedCloningReason)
 	machineScope.SetVirtualMachineID(123)
