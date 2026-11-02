@@ -34,6 +34,29 @@ import (
 
 // DeleteVM implements the logic of destroying a VM.
 func DeleteVM(ctx context.Context, machineScope *scope.MachineScope) error {
+	released, err := destroyVM(ctx, machineScope)
+	if err != nil {
+		conditions.Set(machineScope.ProxmoxMachine, metav1.Condition{
+			Type:   infrav1.ProxmoxMachineVirtualMachineProvisionedCondition,
+			Status: metav1.ConditionFalse,
+			Reason: infrav1.ProxmoxMachineVirtualMachineProvisionedDeletionFailedReason,
+		})
+		return err
+	}
+	if released {
+		// remove machine from cluster status
+		machineScope.InfraCluster.ProxmoxCluster.RemoveNodeLocation(machineScope.Name(), util.IsControlPlaneMachine(machineScope.Machine))
+		// The VM is deleted so remove the finalizer.
+		ctrlutil.RemoveFinalizer(machineScope.ProxmoxMachine, infrav1.MachineFinalizer)
+		return machineScope.InfraCluster.PatchObject()
+	}
+
+	return nil
+}
+
+// destroyVM deletes the machine's VM. It reports released once no VM of this
+// machine holds its VMID; until then a later reconcile calls it again.
+func destroyVM(ctx context.Context, machineScope *scope.MachineScope) (released bool, err error) {
 	vmID := machineScope.ProxmoxMachine.GetVirtualMachineID()
 	where, err := locateVMForDelete(ctx, machineScope)
 	if err == nil {
@@ -48,28 +71,18 @@ func DeleteVM(ctx context.Context, machineScope *scope.MachineScope) error {
 			// The next reconcile deletes the VM once its stop has finished.
 			if errors.Is(err, goproxmox.ErrVMStopping) {
 				machineScope.Info("stopping vm before deleting it", "vmID", vmID)
-				return nil
+				return false, nil
 			}
 		}
 	}
 	if err != nil {
-		released := errors.Is(err, goproxmox.ErrVMIDFree) || (VMNotFound(err) && !errors.Is(err, goproxmox.ErrVMNotOnNode))
-		if released {
-			// remove machine from cluster status
-			machineScope.InfraCluster.ProxmoxCluster.RemoveNodeLocation(machineScope.Name(), util.IsControlPlaneMachine(machineScope.Machine))
-			// The VM is deleted so remove the finalizer.
-			ctrlutil.RemoveFinalizer(machineScope.ProxmoxMachine, infrav1.MachineFinalizer)
-			return machineScope.InfraCluster.PatchObject()
+		if errors.Is(err, goproxmox.ErrVMIDFree) || (VMNotFound(err) && !errors.Is(err, goproxmox.ErrVMNotOnNode)) {
+			return true, nil
 		}
-		conditions.Set(machineScope.ProxmoxMachine, metav1.Condition{
-			Type:   infrav1.ProxmoxMachineVirtualMachineProvisionedCondition,
-			Status: metav1.ConditionFalse,
-			Reason: infrav1.ProxmoxMachineVirtualMachineProvisionedDeletionFailedReason,
-		})
-		return err
+		return false, err
 	}
 
-	return nil
+	return false, nil
 }
 
 // vmLocation is what the cluster says about a machine's VMID before it is deleted.

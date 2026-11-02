@@ -286,6 +286,30 @@ reconciled again every `--machine-location-resync` (default
 node the VM runs on now; `0` disables it. Deleting a machine finds its VM by
 VMID wherever it runs.
 
+## Retrying a failed provisioning
+
+Some provisioning failures are fixed by a new VM. CAPMOX deletes the VM and
+clones a new one under the same ProxmoxMachine, which keeps its IP address
+claims and bootstrap data:
+
+- Proxmox fails to attach the bootstrap ISO.
+- A Proxmox task of the clone or configuration fails.
+- Cloud-init fails on a worker, for example a `kubeadm join` that ends while
+  the control plane is being replaced.
+
+The condition reason is `VMProvisionRetrying` until the new VM is cloned. A
+machine clones at most `--provision-retry-limit` new VMs (default
+`${CAPMOX_PROVISION_RETRY_LIMIT:=3}`; `0` makes every failure final), the
+first after `--provision-retry-backoff` (default
+`${CAPMOX_PROVISION_RETRY_BACKOFF:=30s}`), each later one after twice the
+previous wait. The annotation `provision.capmox.cluster.x-k8s.io/reprovisions`
+counts them. After the last one the reason is `VMProvisionFailed`, and a
+MachineHealthCheck replaces the Machine.
+
+A failed cloud-init on a control plane is final: the machine may already be an
+etcd member, so its control plane provider replaces it. A machine Cluster API
+took the providerID of keeps its VM.
+
 ## Failure Domains (Zone-Based Placement)
 
 CAPMOX zones can be mapped to CAPI failure domains, enabling KubeadmControlPlane
