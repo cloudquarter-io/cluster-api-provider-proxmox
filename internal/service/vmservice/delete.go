@@ -56,11 +56,15 @@ func DeleteVM(ctx context.Context, machineScope *scope.MachineScope) error {
 
 // destroyVM deletes the machine's VM. It reports released once no VM of this
 // machine holds its VMID; until then a later reconcile calls it again.
-// cloneUnnamed counts a VM with an empty or placeholder name as this
-// machine's, as a clone still in progress is.
+// cloneUnnamed deletes a VM with an empty or placeholder name as this
+// machine's, as a clone still in progress is; without it such a VM is waited
+// on, neither deleted nor released.
 func destroyVM(ctx context.Context, machineScope *scope.MachineScope, cloneUnnamed bool) (released bool, err error) {
 	vmID := machineScope.ProxmoxMachine.GetVirtualMachineID()
 	where, err := locateVMForDelete(ctx, machineScope, cloneUnnamed)
+	if err == nil && where == vmUnnamed {
+		return false, nil
+	}
 	if err == nil {
 		if where == vmGone {
 			err = goproxmox.ErrVMIDFree
@@ -97,13 +101,15 @@ const (
 	vmOurs
 	// vmGone: another guest holds the VMID; this machine's VM is gone.
 	vmGone
+	// vmUnnamed: a VM with no name yet holds the VMID; it may be this machine's.
+	vmUnnamed
 )
 
 // locateVMForDelete finds where the machine's VMID is before deleting it.
 // Proxmox HA moves a VM without CAPMOX, and on the node it left the VM "does
 // not exist", which would release the machine and leave the VM running. The
 // cluster listing only says where the VMID is; ownership is read from the VM
-// there (vmOwned), never from the listing's name, which can be stale.
+// there (vmOwnership), never from the listing's name, which can be stale.
 func locateVMForDelete(ctx context.Context, machineScope *scope.MachineScope, cloneUnnamed bool) (vmLocation, error) {
 	vmID := machineScope.ProxmoxMachine.GetVirtualMachineID()
 	if vmID < 100 {
@@ -130,28 +136,47 @@ func locateVMForDelete(ctx context.Context, machineScope *scope.MachineScope, cl
 	if vm.VirtualMachineConfig == nil {
 		return vmUnlisted, errors.Errorf("vm %d on node %s has no config yet", vmID, rsc.Node)
 	}
-	if !vmOwned(machineScope, vm.VirtualMachineConfig, vmID, cloneUnnamed) {
+	switch vmOwnership(machineScope, vm.VirtualMachineConfig, vmID) {
+	case vmNotOurs:
 		machineScope.Info("vmid now names another vm; leaving it", "vmID", vmID, "vmName", vm.VirtualMachineConfig.Name, "node", rsc.Node)
 		return vmGone, nil
+	case vmMaybeOurs:
+		if !cloneUnnamed {
+			machineScope.Info("vmid holds an unnamed vm; waiting for its name", "vmID", vmID, "node", rsc.Node)
+			return vmUnnamed, nil
+		}
 	}
 	machineScope.ProxmoxMachine.Status.ProxmoxNode = new(rsc.Node)
 	return vmOurs, nil
 }
 
-// vmOwned reports whether a VM is this machine's: by its SMBIOS UUID once the
-// machine recorded it as its providerID, else by name, a clone's empty or
-// placeholder name included when cloneUnnamed is set.
-func vmOwned(machineScope *scope.MachineScope, config *proxmox.VirtualMachineConfig, vmID int64, cloneUnnamed bool) bool {
+// ownership is whether a VM is this machine's.
+type ownership int
+
+const (
+	vmNotOurs ownership = iota
+	vmIsOurs
+	// vmMaybeOurs: a clone's empty or placeholder name, before the machine
+	// recorded the VM's providerID.
+	vmMaybeOurs
+)
+
+// vmOwnership reads a VM's ownership: by its SMBIOS UUID once the machine
+// recorded it as its providerID, else by name.
+func vmOwnership(machineScope *scope.MachineScope, config *proxmox.VirtualMachineConfig, vmID int64) ownership {
 	if providerID := machineScope.GetProviderID(); providerID != "" {
-		return providerID == "proxmox://"+extractUUID(config.SMBios1)
+		if providerID == "proxmox://"+extractUUID(config.SMBios1) {
+			return vmIsOurs
+		}
+		return vmNotOurs
 	}
 	switch config.Name {
 	case machineScope.ProxmoxMachine.GetName():
-		return true
+		return vmIsOurs
 	case "", placeholderVMName(vmID):
-		return cloneUnnamed
+		return vmMaybeOurs
 	}
-	return false
+	return vmNotOurs
 }
 
 // VMNotFound checks if the given err is related to that the VM is not found in Proxmox.

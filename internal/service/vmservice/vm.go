@@ -250,7 +250,8 @@ func ReprovisionVM(ctx context.Context, mgmt client.Client, s *scope.MachineScop
 		return wait, nil
 	}
 
-	// No clone is in progress, so an unnamed VM at the VMID is not this machine's.
+	// No clone of this machine is in progress, so an unnamed VM at the VMID is
+	// another clone or the leftover of an interrupted one: it is waited on.
 	released, err := destroyVM(ctx, s, false)
 	if err != nil {
 		return 0, errors.Wrap(err, "unable to delete the vm before cloning a new one")

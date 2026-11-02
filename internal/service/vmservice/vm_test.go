@@ -1187,9 +1187,12 @@ func TestReprovisionVM_WaitsTheDoublingBackoff(t *testing.T) {
 	require.NotNil(t, machineScope.ProxmoxMachine.Status.RetryAfter)
 	require.Equal(t, int64(123), machineScope.GetVirtualMachineID())
 
+	retryAfter := *machineScope.ProxmoxMachine.Status.RetryAfter
+	time.Sleep(10 * time.Millisecond)
 	again, err := ReprovisionVM(context.Background(), nil, machineScope, ReprovisionPolicy{Limit: 3, Backoff: 30 * time.Second})
 	require.NoError(t, err)
-	require.LessOrEqual(t, again, wait, "the recorded wait is kept, not restarted")
+	require.Less(t, again, wait)
+	require.Equal(t, retryAfter, *machineScope.ProxmoxMachine.Status.RetryAfter, "the recorded wait is kept, not restarted")
 }
 
 func TestReprovisionVM_WaitsForTheVMToBeDeleted(t *testing.T) {
@@ -1340,7 +1343,8 @@ func TestReprovisionVM_LeavesAnUnnamedVMAtTheVMIDOfAFailedClone(t *testing.T) {
 
 	_, err := ReprovisionVM(context.Background(), nil, machineScope, ReprovisionPolicy{Limit: 3, Backoff: 30 * time.Second})
 	require.NoError(t, err)
-	require.Nil(t, machineScope.ProxmoxMachine.Spec.VirtualMachineID, "the vmid is released, the vm left")
+	require.Equal(t, int64(123), machineScope.GetVirtualMachineID(), "the unnamed vm is neither deleted nor released")
+	require.Equal(t, infrav1.ProxmoxMachineVirtualMachineProvisionedVMProvisionRetryingReason, conditions.GetReason(machineScope.ProxmoxMachine, infrav1.ProxmoxMachineVirtualMachineProvisionedCondition))
 }
 
 func TestReprovisionVM_AfterAFailedCloneTask(t *testing.T) {
