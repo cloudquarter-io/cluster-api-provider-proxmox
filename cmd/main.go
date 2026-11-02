@@ -51,6 +51,7 @@ import (
 	infrav1alpha1 "github.com/ionos-cloud/cluster-api-provider-proxmox/api/v1alpha1"
 	infrav1 "github.com/ionos-cloud/cluster-api-provider-proxmox/api/v1alpha2"
 	"github.com/ionos-cloud/cluster-api-provider-proxmox/internal/controller"
+	"github.com/ionos-cloud/cluster-api-provider-proxmox/internal/service/vmservice"
 	"github.com/ionos-cloud/cluster-api-provider-proxmox/internal/tlshelper"
 	"github.com/ionos-cloud/cluster-api-provider-proxmox/internal/webhook"
 	capmox "github.com/ionos-cloud/cluster-api-provider-proxmox/pkg/proxmox"
@@ -80,6 +81,7 @@ var (
 	proxmoxInsecure       bool
 	proxmoxRootCertFile   string
 	machineLocationResync time.Duration
+	reprovision           vmservice.ReprovisionPolicy
 )
 
 func init() {
@@ -205,6 +207,7 @@ func setupReconcilers(ctx context.Context, mgr ctrl.Manager, proxmoxClient capmo
 		Recorder:       mgr.GetEventRecorderFor("proxmoxmachine-controller"),
 		ProxmoxClient:  proxmoxClient,
 		LocationResync: machineLocationResync,
+		Reprovision:    reprovision,
 	}).SetupWithManager(mgr); err != nil {
 		return fmt.Errorf("setting up ProxmoxMachine controller: %w", err)
 	}
@@ -282,6 +285,10 @@ func initFlagsAndEnv(fs *pflag.FlagSet) {
 		"If true, run webhook server alongside manager")
 	fs.DurationVar(&machineLocationResync, "machine-location-resync", 0,
 		"Interval at which a ready ProxmoxMachine is reconciled again, so status.proxmoxNode follows a VM that Proxmox HA moved; 0 disables it (duration string)")
+	fs.IntVar(&reprovision.Limit, "provision-retry-limit", 0,
+		"New VMs a ProxmoxMachine clones after a provisioning failure a new VM can fix; 0 makes every failure final")
+	fs.DurationVar(&reprovision.Backoff, "provision-retry-backoff", 30*time.Second,
+		"Wait before the first new VM of a ProxmoxMachine; it doubles for each later one (duration string)")
 
 	flags.AddManagerOptions(fs, &managerOptions)
 

@@ -115,6 +115,11 @@ const (
 	// during virtual machine provisioning.
 	ProxmoxMachineVirtualMachineProvisionedVMProvisionFailedReason = "VMProvisionFailed"
 
+	// ProxmoxMachineVirtualMachineProvisionedVMProvisionRetryingReason documents a
+	// provisioning failure a new virtual machine can fix: the controller deletes
+	// the virtual machine and clones a new one, up to its retry limit.
+	ProxmoxMachineVirtualMachineProvisionedVMProvisionRetryingReason = "VMProvisionRetrying"
+
 	// ProxmoxMachineVirtualMachineProvisionedTaskFailedReason documents a Proxmox task
 	// failure; the controller will automatically retry, but user intervention might
 	// be required.

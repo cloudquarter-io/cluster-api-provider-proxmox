@@ -49,6 +49,8 @@ spec:
         - "--insecure-diagnostics=${CAPI_INSECURE_DIAGNOSTICS:=false}"
         - "--v=${CAPMOX_LOGLEVEL:=0}"
         - "--machine-location-resync=${CAPMOX_MACHINE_LOCATION_RESYNC:=60s}"
+        - "--provision-retry-limit=${CAPMOX_PROVISION_RETRY_LIMIT:=3}"
+        - "--provision-retry-backoff=${CAPMOX_PROVISION_RETRY_BACKOFF:=30s}"
         image: controller:latest
         name: manager
         securityContext:

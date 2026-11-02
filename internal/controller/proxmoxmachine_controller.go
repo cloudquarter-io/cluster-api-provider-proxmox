@@ -58,6 +58,8 @@ type ProxmoxMachineReconciler struct {
 	// LocationResync reconciles a ready ProxmoxMachine again after this long,
 	// so status.proxmoxNode follows a VM that Proxmox HA moved. Zero disables it.
 	LocationResync time.Duration
+	// Reprovision bounds the new VMs cloned after a retryable provisioning failure.
+	Reprovision vmservice.ReprovisionPolicy
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -186,6 +188,11 @@ func (r *ProxmoxMachineReconciler) reconcileNormal(ctx context.Context, machineS
 	if machineScope.HasFailed() {
 		machineScope.Info("Error state detected, skipping reconciliation")
 		return ctrl.Result{}, nil
+	}
+
+	if vmservice.NeedsReprovision(machineScope) {
+		requeueAfter, err := vmservice.ReprovisionVM(ctx, r.Client, machineScope, r.Reprovision)
+		return ctrl.Result{RequeueAfter: requeueAfter}, err
 	}
 
 	if !ptr.Deref(machineScope.Cluster.Status.Initialization.InfrastructureProvisioned, false) {

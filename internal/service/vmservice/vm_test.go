@@ -20,19 +20,24 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	lutherproxmox "github.com/luthermonson/go-proxmox"
+	"github.com/pkg/errors"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
 	"sigs.k8s.io/cluster-api/util/conditions"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	infrav1 "github.com/ionos-cloud/cluster-api-provider-proxmox/api/v1alpha2"
 	"github.com/ionos-cloud/cluster-api-provider-proxmox/internal/service/scheduler"
 	"github.com/ionos-cloud/cluster-api-provider-proxmox/pkg/proxmox"
 	"github.com/ionos-cloud/cluster-api-provider-proxmox/pkg/proxmox/goproxmox"
+	"github.com/ionos-cloud/cluster-api-provider-proxmox/pkg/proxmox/proxmoxtest"
 	"github.com/ionos-cloud/cluster-api-provider-proxmox/pkg/scope"
 )
 
@@ -889,7 +894,7 @@ func TestReconcileVM_CloudInitFailedWrapped(t *testing.T) {
 	cond := conditions.Get(machineScope.ProxmoxMachine, infrav1.ProxmoxMachineVirtualMachineProvisionedCondition)
 	require.NotNil(t, cond)
 	require.Equal(t, metav1.ConditionFalse, cond.Status)
-	require.Equal(t, infrav1.ProxmoxMachineVirtualMachineProvisionedVMProvisionFailedReason, cond.Reason)
+	require.Equal(t, infrav1.ProxmoxMachineVirtualMachineProvisionedVMProvisionRetryingReason, cond.Reason)
 }
 
 func TestReconcileVM_CloudInitRunning(t *testing.T) {
@@ -1099,4 +1104,277 @@ func TestReconcileVM_StateMachine(t *testing.T) {
 	require.Equal(t, machineScope.ProxmoxMachine.GetName(), machineScope.ProxmoxMachine.Status.Addresses[0].Address)
 	require.Equal(t, "192.0.2.10", machineScope.ProxmoxMachine.Status.Addresses[1].Address)
 	require.Equal(t, "2001:db8::2", machineScope.ProxmoxMachine.Status.Addresses[2].Address)
+}
+
+func TestReconcileVM_CloudInitFailedOnAControlPlaneIsFinal(t *testing.T) {
+	machineScope, proxmoxClient, _ := setupReconcilerTestWithCondition(t, infrav1.ProxmoxMachineVirtualMachineProvisionedWaitingForCloudInitReason,
+		func(machine *clusterv1.Machine, _ *infrav1.ProxmoxCluster, _ *infrav1.ProxmoxMachine) {
+			machine.Labels[clusterv1.MachineControlPlaneLabel] = ""
+		})
+	vm := newRunningVM()
+	machineScope.SetVirtualMachineID(int64(vm.VMID))
+	machineScope.ProxmoxMachine.Status.BootstrapDataProvided = new(true)
+
+	proxmoxClient.EXPECT().GetVM(context.Background(), "node1", int64(123)).Return(vm, nil).Once()
+	proxmoxClient.EXPECT().CloudInitStatus(context.Background(), vm).Return(false, goproxmox.ErrCloudInitFailed).Once()
+	proxmoxClient.EXPECT().QemuAgentStatus(context.Background(), vm).Return(nil).Once()
+
+	_, err := ReconcileVM(context.Background(), machineScope)
+	require.Error(t, err)
+	require.True(t, machineScope.HasFailed())
+	require.False(t, NeedsReprovision(machineScope))
+}
+
+// retryingMachine is a worker whose VM 123 on node1 failed in a way a new VM can fix.
+func retryingMachine(t *testing.T) (*scope.MachineScope, *proxmoxtest.MockClient) {
+	machineScope, proxmoxClient, _ := setupReconcilerTest(t)
+	conditions.Set(machineScope.ProxmoxMachine, metav1.Condition{
+		Type:    infrav1.ProxmoxMachineVirtualMachineProvisionedCondition,
+		Status:  metav1.ConditionFalse,
+		Reason:  infrav1.ProxmoxMachineVirtualMachineProvisionedVMProvisionRetryingReason,
+		Message: "cloud-init failed execution",
+	})
+	machineScope.SetVirtualMachineID(123)
+	machineScope.SetAnnotation(vmIDAllocatedByControllerAnnotation, "true")
+	machineScope.SetProviderID("41ec1197-580f-460b-b41b-1dfefabe6e32")
+	machineScope.ProxmoxMachine.Status.ProxmoxNode = new("node1")
+	machineScope.ProxmoxMachine.Status.BootstrapDataProvided = new(true)
+	machineScope.ProxmoxMachine.Status.IPAddresses = []infrav1.IPAddressesSpec{{NetName: string(infrav1.DefaultNetworkDevice), IPv4: []string{"10.10.10.10"}}}
+	machineScope.InfraCluster.ProxmoxCluster.AddNodeLocation(infrav1.NodeLocation{
+		Machine: corev1.LocalObjectReference{Name: machineScope.Name()},
+		Node:    "node1",
+	}, false)
+	return machineScope, proxmoxClient
+}
+
+func TestNeedsReprovision(t *testing.T) {
+	machineScope, _ := retryingMachine(t)
+	require.True(t, NeedsReprovision(machineScope))
+
+	machineScope.Machine.Spec.ProviderID = "proxmox://41ec1197-580f-460b-b41b-1dfefabe6e32"
+	require.False(t, NeedsReprovision(machineScope), "Cluster API took the providerID")
+
+	machineScope, _ = retryingMachine(t)
+	machineScope.ProxmoxMachine.Status.Initialization.Provisioned = new(true)
+	require.False(t, NeedsReprovision(machineScope), "provisioned")
+
+	machineScope, _ = retryingMachine(t)
+	conditions.Set(machineScope.ProxmoxMachine, metav1.Condition{
+		Type:   infrav1.ProxmoxMachineVirtualMachineProvisionedCondition,
+		Status: metav1.ConditionFalse,
+		Reason: infrav1.ProxmoxMachineVirtualMachineProvisionedTaskFailedReason,
+	})
+	machineScope.ProxmoxMachine.Status.TaskRef = new("UPID:node1:clone")
+	require.False(t, NeedsReprovision(machineScope), "the task service still holds the failed task")
+	machineScope.ProxmoxMachine.Status.TaskRef = nil
+	require.True(t, NeedsReprovision(machineScope), "the task service released the failed task")
+
+	conditions.Set(machineScope.ProxmoxMachine, metav1.Condition{
+		Type:   infrav1.ProxmoxMachineVirtualMachineProvisionedCondition,
+		Status: metav1.ConditionFalse,
+		Reason: infrav1.ProxmoxMachineVirtualMachineProvisionedVMProvisionFailedReason,
+	})
+	require.False(t, NeedsReprovision(machineScope), "a final failure")
+}
+
+func TestReprovisionVM_WaitsTheDoublingBackoff(t *testing.T) {
+	machineScope, _ := retryingMachine(t)
+	machineScope.SetAnnotation(reprovisionsAnnotation, "2")
+
+	wait, err := ReprovisionVM(context.Background(), nil, machineScope, ReprovisionPolicy{Limit: 3, Backoff: 30 * time.Second})
+	require.NoError(t, err)
+	require.InDelta(t, (120 * time.Second).Seconds(), wait.Seconds(), 1)
+	require.NotNil(t, machineScope.ProxmoxMachine.Status.RetryAfter)
+	require.Equal(t, int64(123), machineScope.GetVirtualMachineID())
+
+	retryAfter := *machineScope.ProxmoxMachine.Status.RetryAfter
+	time.Sleep(10 * time.Millisecond)
+	again, err := ReprovisionVM(context.Background(), nil, machineScope, ReprovisionPolicy{Limit: 3, Backoff: 30 * time.Second})
+	require.NoError(t, err)
+	require.Less(t, again, wait)
+	require.Equal(t, retryAfter, *machineScope.ProxmoxMachine.Status.RetryAfter, "the recorded wait is kept, not restarted")
+}
+
+func TestReprovisionVM_WaitsForTheVMToBeDeleted(t *testing.T) {
+	machineScope, proxmoxClient := retryingMachine(t)
+	machineScope.ProxmoxMachine.Status.RetryAfter = &metav1.Time{Time: time.Now().Add(-time.Second)}
+
+	proxmoxClient.EXPECT().FindVMResource(context.Background(), uint64(123)).Return(newVMResource(), nil).Once()
+	proxmoxClient.EXPECT().GetVM(context.Background(), "node1", int64(123)).Return(ownVM(), nil).Once()
+	proxmoxClient.EXPECT().DeleteVM(context.Background(), "node1", int64(123)).Return(&lutherproxmox.Task{}, goproxmox.ErrVMStopping).Once()
+
+	wait, err := ReprovisionVM(context.Background(), nil, machineScope, ReprovisionPolicy{Limit: 3, Backoff: 30 * time.Second})
+	require.NoError(t, err)
+	require.Equal(t, infrav1.DefaultReconcilerRequeue, wait)
+	require.Equal(t, int64(123), machineScope.GetVirtualMachineID())
+	require.Equal(t, infrav1.ProxmoxMachineVirtualMachineProvisionedVMProvisionRetryingReason, conditions.GetReason(machineScope.ProxmoxMachine, infrav1.ProxmoxMachineVirtualMachineProvisionedCondition))
+}
+
+func TestReprovisionVM_ClonesANewVMOnceTheOldOneIsGone(t *testing.T) {
+	machineScope, proxmoxClient := retryingMachine(t)
+	workload := withWorkloadNodes(t, nodeWithProviderID("test", "proxmox://41ec1197-580f-460b-b41b-1dfefabe6e32"), nodeWithProviderID("other", "proxmox://56603c36-46b9-4608-90ae-c731c15eae64"))
+	machineScope.SetAnnotation(reprovisionsAnnotation, "1")
+	machineScope.ProxmoxMachine.Status.RetryAfter = &metav1.Time{Time: time.Now().Add(-time.Second)}
+
+	proxmoxClient.EXPECT().FindVMResource(context.Background(), uint64(123)).Return(nil, fmt.Errorf("unable to find VM: %w", goproxmox.ErrVMNotListed)).Once()
+	proxmoxClient.EXPECT().DeleteVM(context.Background(), "node1", int64(123)).Return(nil, goproxmox.ErrVMIDFree).Once()
+
+	_, err := ReprovisionVM(context.Background(), nil, machineScope, ReprovisionPolicy{Limit: 3, Backoff: 30 * time.Second})
+	require.NoError(t, err)
+	pm := machineScope.ProxmoxMachine
+	require.Nil(t, pm.Spec.VirtualMachineID)
+	require.Empty(t, pm.Spec.ProviderID)
+	require.Nil(t, pm.Status.ProxmoxNode)
+	require.Nil(t, pm.Status.RetryAfter)
+	require.Nil(t, pm.Status.BootstrapDataProvided)
+	require.NotContains(t, pm.Annotations, vmIDAllocatedByControllerAnnotation)
+	require.Equal(t, "2", pm.Annotations[reprovisionsAnnotation])
+	require.Equal(t, []infrav1.IPAddressesSpec{{NetName: string(infrav1.DefaultNetworkDevice), IPv4: []string{"10.10.10.10"}}}, pm.Status.IPAddresses)
+	require.Empty(t, machineScope.InfraCluster.ProxmoxCluster.GetNode(machineScope.Name(), false))
+	cond := conditions.Get(pm, infrav1.ProxmoxMachineVirtualMachineProvisionedCondition)
+	require.Equal(t, infrav1.ProxmoxMachineVirtualMachineProvisionedCloningReason, cond.Reason)
+	require.Equal(t, "cloning a new vm after: cloud-init failed execution", cond.Message)
+	require.False(t, NeedsReprovision(machineScope))
+
+	nodes := &corev1.NodeList{}
+	require.NoError(t, workload.List(context.Background(), nodes))
+	require.Len(t, nodes.Items, 1)
+	require.Equal(t, "other", nodes.Items[0].Name, "only the deleted vm's node is deleted")
+
+	// The next reconcile clones the new VM.
+	proxmoxClient.EXPECT().CloneVM(context.Background(), 123, proxmox.VMCloneRequest{Node: "node1", Name: "test", Full: true}).Return(proxmox.VMCloneResponse{NewID: 124, Task: newTask()}, nil).Once()
+	_, err = ReconcileVM(context.Background(), machineScope)
+	require.NoError(t, err)
+	require.Equal(t, int64(124), machineScope.GetVirtualMachineID())
+	require.Equal(t, "true", pm.Annotations[vmIDAllocatedByControllerAnnotation])
+	require.NotNil(t, pm.Status.TaskRef)
+}
+
+func TestReprovisionVM_FailsOnceTheLimitIsUsed(t *testing.T) {
+	for _, tc := range []struct {
+		name, done, message string
+		limit               int
+	}{
+		{name: "limit used", done: "3", limit: 3, message: "cloud-init failed execution (after 3 new vms)"},
+		{name: "retries disabled", done: "", limit: 0, message: "cloud-init failed execution"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			machineScope, _ := retryingMachine(t)
+			if tc.done != "" {
+				machineScope.SetAnnotation(reprovisionsAnnotation, tc.done)
+			}
+
+			wait, err := ReprovisionVM(context.Background(), nil, machineScope, ReprovisionPolicy{Limit: tc.limit, Backoff: 30 * time.Second})
+			require.NoError(t, err)
+			require.Zero(t, wait)
+			require.True(t, machineScope.HasFailed())
+			require.Equal(t, tc.message, conditions.Get(machineScope.ProxmoxMachine, infrav1.ProxmoxMachineVirtualMachineProvisionedCondition).Message)
+			require.Equal(t, int64(123), machineScope.GetVirtualMachineID())
+		})
+	}
+}
+
+// ownVM is the VM retryingMachine recorded: named after the machine, with its BIOS UUID.
+func ownVM() *lutherproxmox.VirtualMachine {
+	vm := namedVM("test")
+	vm.VirtualMachineConfig.SMBios1 = biosUUID
+	return vm
+}
+
+// withWorkloadNodes makes the workload cluster of the test a fake holding nodes.
+func withWorkloadNodes(t *testing.T, nodes ...client.Object) client.Client {
+	workload := fake.NewClientBuilder().WithObjects(nodes...).Build()
+	original := workloadClient
+	workloadClient = func(context.Context, client.Client, *scope.MachineScope) (client.Client, error) { return workload, nil }
+	t.Cleanup(func() { workloadClient = original })
+	return workload
+}
+
+func nodeWithProviderID(name, providerID string) *corev1.Node {
+	return &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: name}, Spec: corev1.NodeSpec{ProviderID: providerID}}
+}
+
+func TestReprovisionVM_KeepsTheMachineWhileItsNodeCannotBeDeleted(t *testing.T) {
+	machineScope, proxmoxClient := retryingMachine(t)
+	machineScope.ProxmoxMachine.Status.RetryAfter = &metav1.Time{Time: time.Now().Add(-time.Second)}
+	original := workloadClient
+	workloadClient = func(context.Context, client.Client, *scope.MachineScope) (client.Client, error) {
+		return nil, errors.New("workload cluster unreachable")
+	}
+	t.Cleanup(func() { workloadClient = original })
+
+	proxmoxClient.EXPECT().FindVMResource(context.Background(), uint64(123)).Return(nil, fmt.Errorf("unable to find VM: %w", goproxmox.ErrVMNotListed)).Once()
+	proxmoxClient.EXPECT().DeleteVM(context.Background(), "node1", int64(123)).Return(nil, goproxmox.ErrVMIDFree).Once()
+
+	_, err := ReprovisionVM(context.Background(), nil, machineScope, ReprovisionPolicy{Limit: 3, Backoff: 30 * time.Second})
+	require.ErrorContains(t, err, "workload cluster unreachable")
+	require.Equal(t, int64(123), machineScope.GetVirtualMachineID())
+	require.NotEmpty(t, machineScope.ProxmoxMachine.Spec.ProviderID)
+	require.True(t, NeedsReprovision(machineScope), "the next reconcile deletes the node again")
+}
+
+func TestReprovisionVM_AVMThatNeverGotItsBootstrapDataHasNoNode(t *testing.T) {
+	machineScope, proxmoxClient := retryingMachine(t)
+	machineScope.ProxmoxMachine.Status.BootstrapDataProvided = nil
+	machineScope.ProxmoxMachine.Status.RetryAfter = &metav1.Time{Time: time.Now().Add(-time.Second)}
+	original := workloadClient
+	workloadClient = func(context.Context, client.Client, *scope.MachineScope) (client.Client, error) {
+		t.Fatal("the workload cluster is not contacted")
+		return nil, nil
+	}
+	t.Cleanup(func() { workloadClient = original })
+
+	proxmoxClient.EXPECT().FindVMResource(context.Background(), uint64(123)).Return(nil, fmt.Errorf("unable to find VM: %w", goproxmox.ErrVMNotListed)).Once()
+	proxmoxClient.EXPECT().DeleteVM(context.Background(), "node1", int64(123)).Return(nil, goproxmox.ErrVMIDFree).Once()
+
+	_, err := ReprovisionVM(context.Background(), nil, machineScope, ReprovisionPolicy{Limit: 3, Backoff: 30 * time.Second})
+	require.NoError(t, err)
+	require.Nil(t, machineScope.ProxmoxMachine.Spec.VirtualMachineID)
+}
+
+func TestReprovisionVM_LeavesAnUnnamedVMAtTheVMIDOfAFailedClone(t *testing.T) {
+	machineScope, proxmoxClient := retryingMachine(t)
+	machineScope.ProxmoxMachine.Spec.ProviderID = ""
+	machineScope.ProxmoxMachine.Status.BootstrapDataProvided = nil
+	machineScope.ProxmoxMachine.Status.RetryAfter = &metav1.Time{Time: time.Now().Add(-time.Second)}
+
+	proxmoxClient.EXPECT().FindVMResource(context.Background(), uint64(123)).Return(newVMResource(), nil).Once()
+	proxmoxClient.EXPECT().GetVM(context.Background(), "node1", int64(123)).Return(namedVM(""), nil).Once()
+
+	_, err := ReprovisionVM(context.Background(), nil, machineScope, ReprovisionPolicy{Limit: 3, Backoff: 30 * time.Second})
+	require.NoError(t, err)
+	require.Equal(t, int64(123), machineScope.GetVirtualMachineID(), "the unnamed vm is neither deleted nor released")
+	require.Equal(t, infrav1.ProxmoxMachineVirtualMachineProvisionedVMProvisionRetryingReason, conditions.GetReason(machineScope.ProxmoxMachine, infrav1.ProxmoxMachineVirtualMachineProvisionedCondition))
+}
+
+func TestReprovisionVM_AfterAFailedCloneTask(t *testing.T) {
+	machineScope, proxmoxClient, _ := setupReconcilerTestWithCondition(t, infrav1.ProxmoxMachineVirtualMachineProvisionedCloningReason)
+	machineScope.SetVirtualMachineID(123)
+	machineScope.SetAnnotation(vmIDAllocatedByControllerAnnotation, "true")
+	machineScope.ProxmoxMachine.Status.TaskRef = new("UPID:node1:001")
+	failed := &lutherproxmox.Task{UPID: "UPID:node1:001", IsFailed: true, IsCompleted: true, ExitStatus: "ERROR: clone failed", Type: "qmclone"}
+	proxmoxClient.EXPECT().GetTask(context.Background(), "UPID:node1:001").Return(failed, nil).Twice()
+	policy := ReprovisionPolicy{Limit: 3, Backoff: 30 * time.Second}
+
+	// The task service marks the task failed, then releases it after its own wait.
+	_, err := ReconcileVM(context.Background(), machineScope)
+	require.NoError(t, err)
+	require.False(t, NeedsReprovision(machineScope))
+	machineScope.ProxmoxMachine.Status.RetryAfter = &metav1.Time{Time: time.Now().Add(-time.Second)}
+	_, err = ReconcileVM(context.Background(), machineScope)
+	require.NoError(t, err)
+	require.Nil(t, machineScope.ProxmoxMachine.Status.TaskRef)
+	require.True(t, NeedsReprovision(machineScope))
+
+	wait, err := ReprovisionVM(context.Background(), nil, machineScope, policy)
+	require.NoError(t, err)
+	require.InDelta(t, (30 * time.Second).Seconds(), wait.Seconds(), 1)
+
+	machineScope.ProxmoxMachine.Status.RetryAfter = &metav1.Time{Time: time.Now().Add(-time.Second)}
+	proxmoxClient.EXPECT().FindVMResource(context.Background(), uint64(123)).Return(nil, fmt.Errorf("unable to find VM: %w", goproxmox.ErrVMNotListed)).Once()
+	proxmoxClient.EXPECT().DeleteVM(context.Background(), "node1", int64(123)).Return(nil, goproxmox.ErrVMIDFree).Once()
+	_, err = ReprovisionVM(context.Background(), nil, machineScope, policy)
+	require.NoError(t, err)
+	require.Nil(t, machineScope.ProxmoxMachine.Spec.VirtualMachineID)
+	require.Equal(t, "cloning a new vm after: qmclone: ERROR: clone failed", conditions.Get(machineScope.ProxmoxMachine, infrav1.ProxmoxMachineVirtualMachineProvisionedCondition).Message)
 }

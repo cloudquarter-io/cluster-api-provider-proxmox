@@ -280,7 +280,27 @@ func TestReconcileBootstrapData_BadInjector(t *testing.T) {
 	require.Contains(t, err.Error(), "failed to inject bootstrap data: bad FakeISOInjector")
 	require.False(t, requeue)
 	require.True(t, conditions.Has(machineScope.ProxmoxMachine, infrav1.ProxmoxMachineVirtualMachineProvisionedCondition))
+	require.Equal(t, infrav1.ProxmoxMachineVirtualMachineProvisionedVMProvisionFailedReason, conditions.GetReason(machineScope.ProxmoxMachine, infrav1.ProxmoxMachineVirtualMachineProvisionedCondition))
 	require.Nil(t, machineScope.ProxmoxMachine.Status.BootstrapDataProvided)
+}
+
+func TestReconcileBootstrapData_ProxmoxInjectErrorIsRetryable(t *testing.T) {
+	machineScope, _, kubeClient := setupReconcilerTestWithCondition(t, infrav1.ProxmoxMachineVirtualMachineProvisionedWaitingForBootstrapDataReconciliationReason)
+	setupVMWithMetadata(machineScope)
+	createBootstrapSecret(t, kubeClient, machineScope, cloudinit.FormatCloudConfig)
+	defaultPool := addDefaultIPPool(machineScope)
+	createIPPools(t, kubeClient, machineScope)
+	createIPAddress(t, kubeClient, machineScope, infrav1.DefaultNetworkDevice, "10.10.10.10", 0, &defaultPool)
+
+	getISOInjector = func(_ *proxmox.VirtualMachine, _ []byte, _, _ cloudinit.Renderer) isoInjector {
+		return FakeISOInjector{Error: fmt.Errorf("unable to inject CloudInit ISO: %w", inject.ProxmoxError{Err: errors.New("500 got no worker upid - start worker failed")})}
+	}
+	t.Cleanup(func() { getISOInjector = defaultISOInjector })
+
+	_, err := reconcileBootstrapData(context.Background(), machineScope)
+	require.ErrorContains(t, err, "start worker failed")
+	require.Equal(t, infrav1.ProxmoxMachineVirtualMachineProvisionedVMProvisionRetryingReason, conditions.GetReason(machineScope.ProxmoxMachine, infrav1.ProxmoxMachineVirtualMachineProvisionedCondition))
+	require.False(t, machineScope.HasFailed())
 }
 
 func TestGetBootstrapData_MissingSecretName(t *testing.T) {
