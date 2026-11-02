@@ -52,6 +52,6 @@ public; check its visibility after the first publication.
 
 `make lint test` as upstream. The kube-api-linter binary in `bin/` reads the
 Go toolchain `go.mod` declares; on a newer local Go run it as
-`GOTOOLCHAIN=go1.26.6 bin/golangci-lint-kube-api-linter run --config .golangci-kal.yml ./...`.
+`GOTOOLCHAIN=go1.26.10 bin/golangci-lint-kube-api-linter run --config .golangci-kal.yml ./...`.
 The e2e workflows need a Proxmox lab the fork does not have; pull requests
 carry the `e2e/none` label.

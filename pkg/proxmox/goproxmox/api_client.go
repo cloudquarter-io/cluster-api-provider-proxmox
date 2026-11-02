@@ -257,7 +257,12 @@ func (c *APIClient) DeleteVM(ctx context.Context, nodeName string, vmID int64) (
 		return nil, fmt.Errorf("vm with id %d: %w %s: %w", vmID, ErrVMNotOnNode, nodeName, err)
 	}
 
-	if vm.IsRunning() {
+	// Proxmox refuses to destroy a VM whose process runs, paused or not.
+	if vm.Status == proxmox.StatusVirtualMachineRunning {
+		// A locked VM's stop task fails later, out of sight.
+		if vm.Lock != "" {
+			return nil, fmt.Errorf("cannot stop vm id %d: vm is locked (%s)", vmID, vm.Lock)
+		}
 		task, err := vm.Stop(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("cannot stop vm id %d: %w", vmID, err)
