@@ -72,9 +72,10 @@ func DeleteVM(ctx context.Context, machineScope *scope.MachineScope) error {
 // locateVMForDelete records the node the VM runs on now. Proxmox HA moves a
 // VM without CAPMOX, and on the node it left the VM "does not exist", which
 // DeleteVM reads as already deleted: it would drop the finalizer and leave
-// the VM running. It reports the VM gone when its VMID now names another VM,
-// which must not be deleted. A VMID no node lists, or one still carrying a
-// clone's placeholder name, keeps the recorded node.
+// the VM running. The cluster resource listing only says where the VMID is;
+// its name can be minutes stale, so the VM's own config decides. The VM is
+// gone when that config names another VM, which must not be deleted. A VMID
+// no node lists keeps the recorded node.
 func locateVMForDelete(ctx context.Context, machineScope *scope.MachineScope) (gone bool, err error) {
 	vmID := machineScope.ProxmoxMachine.GetVirtualMachineID()
 	if vmID < 100 {
@@ -87,16 +88,23 @@ func locateVMForDelete(ctx context.Context, machineScope *scope.MachineScope) (g
 	if err != nil {
 		return false, errors.Wrapf(err, "unable to locate vm %d before deleting it", vmID)
 	}
-	switch rsc.Name {
-	case machineScope.ProxmoxMachine.GetName():
-		if rsc.Node != "" {
-			machineScope.ProxmoxMachine.Status.ProxmoxNode = new(rsc.Node)
-		}
-		return false, nil
-	case "", placeholderVMName(vmID):
+	if rsc.Node == "" {
 		return false, nil
 	}
-	return true, nil
+	vm, err := machineScope.ProxmoxClient().GetVM(ctx, rsc.Node, vmID)
+	if err != nil {
+		return false, errors.Wrapf(err, "unable to read vm %d on node %s before deleting it", vmID, rsc.Node)
+	}
+	name := ""
+	if vm.VirtualMachineConfig != nil {
+		name = vm.VirtualMachineConfig.Name
+	}
+	if name != "" && name != placeholderVMName(vmID) && name != machineScope.ProxmoxMachine.GetName() {
+		machineScope.Info("vmid now names another vm; leaving it", "vmID", vmID, "vmName", name, "node", rsc.Node)
+		return true, nil
+	}
+	machineScope.ProxmoxMachine.Status.ProxmoxNode = new(rsc.Node)
+	return false, nil
 }
 
 // VMNotFound checks if the given err is related to that the VM is not found in Proxmox.

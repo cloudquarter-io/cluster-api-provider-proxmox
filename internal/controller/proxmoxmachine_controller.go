@@ -25,6 +25,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
@@ -282,7 +283,8 @@ func (r *ProxmoxMachineReconciler) reconcileNormal(ctx context.Context, machineS
 		Reason: clusterv1.ProvisionedReason,
 	})
 
-	return reconcile.Result{RequeueAfter: r.LocationResync}, nil
+	// Jitter spreads the passes so machines readied together do not poll Proxmox in lockstep.
+	return reconcile.Result{RequeueAfter: wait.Jitter(r.LocationResync, 0.2)}, nil
 }
 
 func (r *ProxmoxMachineReconciler) getInfraCluster(ctx context.Context, logger *logr.Logger, cluster *clusterv1.Cluster, proxmoxMachine *infrav1.ProxmoxMachine) (*scope.ClusterScope, error) {
