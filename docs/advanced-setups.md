@@ -297,7 +297,8 @@ claims and bootstrap data:
 - Cloud-init fails on a worker, for example a `kubeadm join` that ends while
   the control plane is being replaced.
 
-The condition reason is `VMProvisionRetrying` until the new VM is cloned. A
+The condition reason is `VMProvisionRetrying`, or `TaskFailed` for a failed
+Proxmox task, until the new VM is cloned. A
 machine clones at most `--provision-retry-limit` new VMs (default
 `${CAPMOX_PROVISION_RETRY_LIMIT:=3}`; `0` makes every failure final), the
 first after `--provision-retry-backoff` (default
