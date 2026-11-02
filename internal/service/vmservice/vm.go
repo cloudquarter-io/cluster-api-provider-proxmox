@@ -27,11 +27,14 @@ import (
 
 	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
 	clusterv1 "sigs.k8s.io/cluster-api/api/core/v1beta2"
+	"sigs.k8s.io/cluster-api/controllers/remote"
 	"sigs.k8s.io/cluster-api/util"
 	"sigs.k8s.io/cluster-api/util/conditions"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	infrav1 "github.com/ionos-cloud/cluster-api-provider-proxmox/api/v1alpha2"
 	"github.com/ionos-cloud/cluster-api-provider-proxmox/internal/inject"
@@ -172,7 +175,7 @@ func checkCloudInitStatus(ctx context.Context, machineScope *scope.MachineScope)
 			if errors.Is(err, goproxmox.ErrCloudInitFailed) {
 				// A control plane may have joined etcd before its bootstrap failed; a
 				// new VM under the same name and address would restart that member
-				// without its data, so only its control plane provider replaces it.
+				// without its data, so it is left to its control plane provider.
 				reason := infrav1.ProxmoxMachineVirtualMachineProvisionedVMProvisionRetryingReason
 				if util.IsControlPlaneMachine(machineScope.Machine) {
 					reason = infrav1.ProxmoxMachineVirtualMachineProvisionedVMProvisionFailedReason
@@ -226,7 +229,7 @@ func NeedsReprovision(s *scope.MachineScope) bool {
 // ReprovisionVM replaces the VM of a ProxmoxMachine NeedsReprovision reports. After the policy's backoff
 // it deletes the VM and resets the machine to clone a new one; the IP address claims and the bootstrap
 // data stay. Once the policy's new VMs are used up, the failure is final.
-func ReprovisionVM(ctx context.Context, s *scope.MachineScope, policy ReprovisionPolicy) (requeueAfter time.Duration, err error) {
+func ReprovisionVM(ctx context.Context, mgmt client.Client, s *scope.MachineScope, policy ReprovisionPolicy) (requeueAfter time.Duration, err error) {
 	cause := conditions.Get(s.ProxmoxMachine, infrav1.ProxmoxMachineVirtualMachineProvisionedCondition).Message
 	done, _ := strconv.Atoi(s.ProxmoxMachine.Annotations[reprovisionsAnnotation])
 	if done >= policy.Limit {
@@ -234,7 +237,7 @@ func ReprovisionVM(ctx context.Context, s *scope.MachineScope, policy Reprovisio
 			Type:    infrav1.ProxmoxMachineVirtualMachineProvisionedCondition,
 			Status:  metav1.ConditionFalse,
 			Reason:  infrav1.ProxmoxMachineVirtualMachineProvisionedVMProvisionFailedReason,
-			Message: fmt.Sprintf("%s (after %d new vms)", cause, done),
+			Message: finalMessage(cause, done),
 		})
 		return 0, nil
 	}
@@ -247,12 +250,20 @@ func ReprovisionVM(ctx context.Context, s *scope.MachineScope, policy Reprovisio
 		return wait, nil
 	}
 
-	released, err := destroyVM(ctx, s)
+	// No clone is in progress, so an unnamed VM at the VMID is not this machine's.
+	released, err := destroyVM(ctx, s, false)
 	if err != nil {
 		return 0, errors.Wrap(err, "unable to delete the vm before cloning a new one")
 	}
 	if !released {
 		return infrav1.DefaultReconcilerRequeue, nil
+	}
+	// A VM that received its bootstrap data may have registered its Node. The new
+	// VM keeps the name but not the BIOS UUID, and a Node's providerID cannot change.
+	if ptr.Deref(s.ProxmoxMachine.Status.BootstrapDataProvided, false) {
+		if err := deleteNode(ctx, mgmt, s); err != nil {
+			return 0, errors.Wrap(err, "unable to delete the deleted vm's node before cloning a new one")
+		}
 	}
 
 	s.InfraCluster.ProxmoxCluster.RemoveNodeLocation(s.Name(), util.IsControlPlaneMachine(s.Machine))
@@ -262,7 +273,6 @@ func ReprovisionVM(ctx context.Context, s *scope.MachineScope, policy Reprovisio
 	s.ProxmoxMachine.Spec.VirtualMachineID = nil
 	s.ProxmoxMachine.Spec.ProviderID = ""
 	s.ProxmoxMachine.Status.ProxmoxNode = nil
-	s.ProxmoxMachine.Status.TaskRef = nil
 	s.ProxmoxMachine.Status.RetryAfter = nil
 	s.ProxmoxMachine.Status.BootstrapDataProvided = nil
 	delete(s.ProxmoxMachine.Annotations, vmIDAllocatedByControllerAnnotation)
@@ -276,6 +286,45 @@ func ReprovisionVM(ctx context.Context, s *scope.MachineScope, policy Reprovisio
 	s.Info("cloning a new vm", "reprovisions", done+1, "cause", cause)
 
 	return infrav1.DefaultReconcilerRequeue, nil
+}
+
+// finalMessage is the condition message of a failure no new VM is cloned for.
+func finalMessage(cause string, reprovisions int) string {
+	if reprovisions == 0 {
+		return cause
+	}
+	return fmt.Sprintf("%s (after %d new vms)", cause, reprovisions)
+}
+
+// workloadClient returns a client of the machine's workload cluster.
+var workloadClient = func(ctx context.Context, mgmt client.Client, s *scope.MachineScope) (client.Client, error) {
+	return remote.NewClusterClient(ctx, "capmox", mgmt, util.ObjectKey(s.Cluster))
+}
+
+// deleteNode deletes the workload Node whose providerID is the machine's.
+func deleteNode(ctx context.Context, mgmt client.Client, s *scope.MachineScope) error {
+	providerID := s.GetProviderID()
+	if providerID == "" {
+		return nil
+	}
+	c, err := workloadClient(ctx, mgmt, s)
+	if err != nil {
+		return err
+	}
+	nodes := &corev1.NodeList{}
+	if err := c.List(ctx, nodes); err != nil {
+		return err
+	}
+	for i := range nodes.Items {
+		if nodes.Items[i].Spec.ProviderID != providerID {
+			continue
+		}
+		if err := c.Delete(ctx, &nodes.Items[i]); err != nil && !apierrors.IsNotFound(err) {
+			return err
+		}
+		s.Info("deleted the node of the deleted vm", "node", nodes.Items[i].Name)
+	}
+	return nil
 }
 
 // ensureVirtualMachine creates a Proxmox VM if it doesn't exist and updates the given MachineScope.

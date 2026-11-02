@@ -191,7 +191,7 @@ func (r *ProxmoxMachineReconciler) reconcileNormal(ctx context.Context, machineS
 	}
 
 	if vmservice.NeedsReprovision(machineScope) {
-		requeueAfter, err := vmservice.ReprovisionVM(ctx, machineScope, r.Reprovision)
+		requeueAfter, err := vmservice.ReprovisionVM(ctx, r.Client, machineScope, r.Reprovision)
 		return ctrl.Result{RequeueAfter: requeueAfter}, err
 	}
 

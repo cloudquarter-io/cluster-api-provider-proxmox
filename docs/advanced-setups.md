@@ -303,12 +303,16 @@ machine clones at most `--provision-retry-limit` new VMs (default
 first after `--provision-retry-backoff` (default
 `${CAPMOX_PROVISION_RETRY_BACKOFF:=30s}`), each later one after twice the
 previous wait. The annotation `provision.capmox.cluster.x-k8s.io/reprovisions`
-counts them. After the last one the reason is `VMProvisionFailed`, and a
-MachineHealthCheck replaces the Machine.
+counts them. After the last one the reason is `VMProvisionFailed`; a
+MachineHealthCheck that targets the Machine then replaces it.
+
+A VM that received its bootstrap data may have registered its Node, which
+keeps the deleted VM's providerID; CAPMOX deletes that Node from the workload
+cluster before it clones the new VM.
 
 A failed cloud-init on a control plane is final: the machine may already be an
-etcd member, so its control plane provider replaces it. A machine Cluster API
-took the providerID of keeps its VM.
+etcd member. Its control plane provider replaces it when a MachineHealthCheck
+marks it unhealthy. A machine Cluster API took the providerID of keeps its VM.
 
 ## Failure Domains (Zone-Based Placement)
 
