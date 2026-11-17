@@ -489,8 +489,11 @@ does not find in the object's own namespace. Such a Secret belongs to whoever
 created it, and is theirs to delete.
 
 When a ProxmoxCluster of another namespace starts to use a Secret, the owner
-reference of a ProxmoxCluster that no longer exists or is being deleted is
-removed from it, so that the Secret is not deleted with that cluster.
+reference of a ProxmoxCluster that no longer uses it is removed, so that the
+Secret is not deleted with that cluster: one that no longer exists, or one that
+is being deleted and has released the Secret. A ProxmoxCluster that is being
+deleted and still has machines keeps its owner reference until it releases the
+Secret.
 
 Only ProxmoxClusters count as users: an owner reference of another kind does
 not keep the finalizer. A user label names its ProxmoxCluster by UID, so it does

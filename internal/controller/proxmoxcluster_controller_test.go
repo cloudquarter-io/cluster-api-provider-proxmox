@@ -472,6 +472,57 @@ var _ = Describe("External Credentials Tests", func() {
 			cleanup(proxmoxCluster, capiCluster, secret)
 		})
 
+		It("keeps the owner reference of a ProxmoxCluster that is being deleted and has not released the Secret", func() {
+			secret := createSecretIn(otherNamespace())
+
+			owner := createProxmoxClusterIn(secret.Namespace, "")
+			setCredentialsRefOnProxmoxCluster(owner, secret)
+			ownerCapiCluster := createOwnerCluster(owner)
+			owner = refreshCluster(owner)
+			setCapiClusterOwnerRefOnProxmoxCluster(owner, ownerCapiCluster)
+			assertProxmoxClusterIsReady(owner)
+			assertSecretHasOwnerUIDs(secret, owner)
+
+			By("the owner being deleted, and held while its Cluster is not")
+			deleteProxmoxCluster(owner)
+			Eventually(func(g Gomega) {
+				g.Expect(k8sClient.Get(testEnv.GetContext(), client.ObjectKeyFromObject(owner), owner)).To(Succeed())
+				g.Expect(owner.GetDeletionTimestamp().IsZero()).To(BeFalse())
+			}).WithTimeout(time.Second * 10).WithPolling(time.Second).Should(Succeed())
+
+			user := createProxmoxCluster()
+			setCredentialsRefOnProxmoxCluster(user, secret)
+			userCapiCluster := createOwnerCluster(user)
+			user = refreshCluster(user)
+			setCapiClusterOwnerRefOnProxmoxCluster(user, userCapiCluster)
+			assertProxmoxClusterIsReady(user)
+			assertSecretHasUserLabels(secret, user)
+			assertSecretHasOwnerUIDs(secret, owner)
+
+			By("the user going: the owner still holds the Secret")
+			deleteCapiCluster(userCapiCluster)
+			deleteProxmoxCluster(user)
+			assertProxmoxClusterIsDeleted(user)
+			assertSecretHasUserLabels(secret)
+			assertSecretHasOwnerUIDs(secret, owner)
+			assertSecretHasFinalizer(secret, infrav1.SecretFinalizer)
+
+			By("the owner's Cluster going too; the deletion of a Cluster does not reconcile its ProxmoxCluster, a change of the ProxmoxCluster does")
+			deleteCapiCluster(ownerCapiCluster)
+			Eventually(func() error {
+				if err := k8sClient.Get(testEnv.GetContext(), client.ObjectKeyFromObject(owner), owner); err != nil {
+					return err
+				}
+				owner.Annotations = map[string]string{"test.cluster.x-k8s.io/reconcile": "now"}
+				return k8sClient.Update(testEnv.GetContext(), owner)
+			}).WithTimeout(time.Second * 10).WithPolling(time.Second).Should(Succeed())
+			assertProxmoxClusterIsDeleted(owner)
+			assertSecretHasNoFinalizer(secret, infrav1.SecretFinalizer)
+
+			forgetSecret(secret)
+			cleanup(owner, ownerCapiCluster, user, userCapiCluster, secret)
+		})
+
 		It("refuses to write a Secret that changed since it was read", func() {
 			secret := createSecretIn(otherNamespace())
 			proxmoxCluster := createProxmoxCluster()
