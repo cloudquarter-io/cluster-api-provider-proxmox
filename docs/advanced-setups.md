@@ -479,6 +479,10 @@ may use one Secret. How the use is recorded depends on where the Secret is:
 | the ProxmoxCluster's namespace | an owner reference | the finalizer is removed and the Secret is deleted with the cluster |
 | another namespace | the label `user.proxmoxcluster.infrastructure.cluster.x-k8s.io/<ProxmoxCluster UID>` | the finalizer is removed and the Secret stays |
 
+A Secret of its own namespace that a ProxmoxCluster no longer reads when it is
+deleted, because its reference changed, loses the owner reference with the
+finalizer and is not deleted with the cluster.
+
 A Secret used both from its own namespace and from another is kept while any of
 them uses it: the owner reference of a ProxmoxCluster that is deleted while
 another user remains is removed, and the Secret is then not deleted with it.
@@ -503,9 +507,10 @@ ProxmoxCluster has the UID of a label, remove the label by hand, and the
 finalizer too if no other label or ProxmoxCluster owner reference is left.
 
 A Secret of another namespace that an earlier version made the ProxmoxCluster an
-owner of is already marked for deletion, and Kubernetes removes it when its last
-user releases it. The owner references are replaced with labels, but the mark
-cannot be taken back: create the Secret again once it is gone.
+owner of is already marked for deletion, unless a ProxmoxCluster of its own
+namespace owned it too, and Kubernetes removes it when its last user releases
+it. The owner references are replaced with labels, but the mark cannot be taken
+back: create the Secret again once it is gone.
 
 The owner reference is replaced on the Secrets a ProxmoxCluster reads. A Secret
 of another namespace that it stopped reading under the earlier version, a

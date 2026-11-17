@@ -498,7 +498,10 @@ func (r *ProxmoxClusterReconciler) reconcileDeleteCredentialsSecret(ctx context.
 		released[secretKey] = true
 	}
 
-	return r.releaseCredentialsSecrets(ctx, proxmoxCluster, released, false)
+	// A Secret the cluster no longer reads loses its owner reference too, as
+	// it would have on the next reconcile: it is not collected with the
+	// cluster.
+	return r.releaseCredentialsSecrets(ctx, proxmoxCluster, released, true)
 }
 
 // releaseCredentialsSecret takes the ProxmoxCluster off a Secret it uses.
