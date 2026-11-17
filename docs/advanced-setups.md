@@ -363,7 +363,7 @@ spec:
 |-------|------|---------|-------------|
 | `nodes` | `[]string` | — | Proxmox nodes belonging to this zone. VMs assigned to this failure domain are scheduled only on these nodes. |
 | `controlPlaneEligible` | `*bool` | `true` | Whether control plane machines may be placed in this zone. Set to `false` for worker-only zones. |
-| `credentialsRef` | `SecretReference` | the cluster's client | Credentials of the Proxmox cluster backing this zone, in the shape of the ProxmoxCluster's `credentialsRef`; the Secret must be named. Machines placed in the zone are cloned, configured and deleted through that endpoint. The Secret gets the ProxmoxCluster's owner reference and finalizer, like the cluster's own, and is released when the zone or the reference is removed from the spec. |
+| `credentialsRef` | `SecretReference` | the cluster's client | Credentials of the Proxmox cluster backing this zone, in the shape of the ProxmoxCluster's `credentialsRef`; the Secret must be named. Machines placed in the zone are cloned, configured and deleted through that endpoint. The Secret is recorded as used by the ProxmoxCluster and finalized, like the cluster's own, and is released when the zone or the reference is removed from the spec; see [Credentials Secrets](#credentials-secrets). |
 | `templateSource` | `TemplateSource` | the machine's | The template the zone's machines are cloned from (`sourceNode` + `templateID`, or `templateSelector`), replacing the ProxmoxMachine's. |
 | `storage` | `string` | the machine's | Target storage of the full clone for the zone's machines. |
 | `networkDevices` | `[]ZoneNetworkDevice` | the machine's | Per device name, overrides the `bridge`, `model`, `mtu`, `vlan` and `queues` of the ProxmoxMachine's device of the same name (`net0` when unnamed). Every device named here must be one the machine declares; an override naming another device keeps the zone's machines from being cloned until it is fixed. Addressing stays the machine's device configuration and the zone's IP config; `mtu` sets the Proxmox NIC only, the guest's link MTU is still the machine device's `linkMtu`. |
@@ -465,6 +465,29 @@ without zones continue to work exactly as before.
 
 - Zones without a `nodes` list appear as failure domains but do not restrict VM placement
   to specific Proxmox nodes. The IPAM pool selection still works per-zone.
+
+## Credentials Secrets
+
+A ProxmoxCluster records itself as a user of every credentials Secret it reads,
+its own `credentialsRef` and each zone's, and puts the finalizer
+`proxmoxcluster.infrastructure.cluster.x-k8s.io/secret` on it, so that the Secret
+cannot be deleted while machines are reached through it. Several ProxmoxClusters
+may use one Secret. How the use is recorded depends on where the Secret is:
+
+| The Secret is in | Recorded as | When its last ProxmoxCluster is deleted |
+|------------------|-------------|------------------------------------------|
+| the ProxmoxCluster's namespace | an owner reference | the finalizer is removed and the Secret is deleted with the cluster |
+| another namespace | the label `user.proxmoxcluster.infrastructure.cluster.x-k8s.io/<ProxmoxCluster UID>` | the finalizer is removed and the Secret stays |
+
+A Secret of another namespace gets no owner reference, because an owner
+reference cannot cross namespaces: Kubernetes deletes an object whose owner it
+does not find in the object's own namespace. Such a Secret belongs to whoever
+created it, and is theirs to delete.
+
+A Secret of another namespace that an earlier version made the ProxmoxCluster an
+owner of is already marked for deletion, and Kubernetes removes it when its last
+user releases it. The owner references are replaced with labels, but the mark
+cannot be taken back: create the Secret again once it is gone.
 
 ## Custom Allowed Nodes for ProxmoxMachine
 

@@ -19,6 +19,7 @@ package controller
 import (
 	"context"
 	"reflect"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -326,6 +327,125 @@ var _ = Describe("External Credentials Tests", func() {
 
 			cleanup(proxmoxCluster, capiCluster, secret, zoneSecret)
 		})
+
+		It("uses a credentials Secret of another namespace without owning it", func() {
+			secret := createSecretIn(otherNamespace())
+			proxmoxCluster := createProxmoxCluster()
+			setCredentialsRefOnProxmoxCluster(proxmoxCluster, secret)
+			capiCluster := createOwnerCluster(proxmoxCluster)
+			proxmoxCluster = refreshCluster(proxmoxCluster)
+			setCapiClusterOwnerRefOnProxmoxCluster(proxmoxCluster, capiCluster)
+
+			assertProxmoxClusterIsReady(proxmoxCluster)
+			assertSecretHasUserLabels(secret, proxmoxCluster)
+			assertSecretHasFinalizer(secret, infrav1.SecretFinalizer)
+			assertSecretHasNumberOfOwnerRefs(secret, 0)
+
+			By("leaving the Secret in place once the cluster is deleted")
+			deleteCapiCluster(capiCluster)
+			deleteProxmoxCluster(proxmoxCluster)
+			assertProxmoxClusterIsDeleted(proxmoxCluster)
+			assertSecretHasUserLabels(secret)
+			assertSecretHasNoFinalizer(secret, infrav1.SecretFinalizer)
+			Expect(secret.GetDeletionTimestamp().IsZero()).To(BeTrue())
+
+			cleanup(proxmoxCluster, capiCluster, secret)
+		})
+
+		It("keeps a Secret of another namespace finalized until its last cluster is deleted", func() {
+			secret := createSecretIn(otherNamespace())
+
+			proxmoxCluster1 := createProxmoxCluster()
+			setCredentialsRefOnProxmoxCluster(proxmoxCluster1, secret)
+			capiCluster1 := createOwnerCluster(proxmoxCluster1)
+			proxmoxCluster1 = refreshCluster(proxmoxCluster1)
+			setCapiClusterOwnerRefOnProxmoxCluster(proxmoxCluster1, capiCluster1)
+			assertProxmoxClusterIsReady(proxmoxCluster1)
+
+			proxmoxCluster2 := createProxmoxCluster()
+			setCredentialsRefOnProxmoxCluster(proxmoxCluster2, secret)
+			capiCluster2 := createOwnerCluster(proxmoxCluster2)
+			proxmoxCluster2 = refreshCluster(proxmoxCluster2)
+			setCapiClusterOwnerRefOnProxmoxCluster(proxmoxCluster2, capiCluster2)
+			assertProxmoxClusterIsReady(proxmoxCluster2)
+
+			assertSecretHasUserLabels(secret, proxmoxCluster1, proxmoxCluster2)
+			assertSecretHasFinalizer(secret, infrav1.SecretFinalizer)
+			assertSecretHasNumberOfOwnerRefs(secret, 0)
+
+			deleteCapiCluster(capiCluster2)
+			deleteProxmoxCluster(proxmoxCluster2)
+			assertProxmoxClusterIsDeleted(proxmoxCluster2)
+			assertSecretHasUserLabels(secret, proxmoxCluster1)
+			assertSecretHasFinalizer(secret, infrav1.SecretFinalizer)
+
+			deleteCapiCluster(capiCluster1)
+			deleteProxmoxCluster(proxmoxCluster1)
+			assertProxmoxClusterIsDeleted(proxmoxCluster1)
+			assertSecretHasUserLabels(secret)
+			assertSecretHasNoFinalizer(secret, infrav1.SecretFinalizer)
+
+			cleanup(proxmoxCluster1, capiCluster1, proxmoxCluster2, capiCluster2, secret)
+		})
+
+		It("releases a zone's Secret of another namespace once the zone is dropped", func() {
+			secret := createSecret()
+			zoneSecret := createSecretIn(otherNamespace())
+			proxmoxCluster := createProxmoxCluster()
+			setCredentialsRefOnProxmoxCluster(proxmoxCluster, secret)
+			setZoneCredentialsRefOnProxmoxCluster(proxmoxCluster, "dc-a", zoneSecret)
+			capiCluster := createOwnerCluster(proxmoxCluster)
+			proxmoxCluster = refreshCluster(proxmoxCluster)
+			setCapiClusterOwnerRefOnProxmoxCluster(proxmoxCluster, capiCluster)
+
+			assertProxmoxClusterIsReady(proxmoxCluster)
+			assertSecretHasUserLabels(zoneSecret, proxmoxCluster)
+			assertSecretHasFinalizer(zoneSecret, infrav1.SecretFinalizer)
+			assertSecretHasNumberOfOwnerRefs(zoneSecret, 0)
+			assertSecretHasUserLabels(secret)
+			assertSecretHasNumberOfOwnerRefs(secret, 1)
+
+			clearZoneConfigsOnProxmoxCluster(proxmoxCluster)
+			assertSecretHasUserLabels(zoneSecret)
+			assertSecretHasNoFinalizer(zoneSecret, infrav1.SecretFinalizer)
+			assertSecretHasFinalizer(secret, infrav1.SecretFinalizer)
+
+			deleteCapiCluster(capiCluster)
+			deleteProxmoxCluster(proxmoxCluster)
+			assertProxmoxClusterIsDeleted(proxmoxCluster)
+
+			cleanup(proxmoxCluster, capiCluster, secret, zoneSecret)
+		})
+
+		It("replaces an owner reference on a Secret of another namespace with the user label", func() {
+			secret := createSecretIn(otherNamespace())
+			proxmoxCluster := createProxmoxCluster()
+			By("an earlier version having made the cluster and another one owners")
+			setOwnerRefsOnSecret(secret,
+				metav1.OwnerReference{APIVersion: infrav1.GroupVersion.String(), Kind: "ProxmoxCluster", Name: proxmoxCluster.Name, UID: proxmoxCluster.UID},
+				metav1.OwnerReference{APIVersion: infrav1.GroupVersion.String(), Kind: "ProxmoxCluster", Name: "another-cluster", UID: types.UID(util.RandomString(6))},
+			)
+			setCredentialsRefOnProxmoxCluster(proxmoxCluster, secret)
+			capiCluster := createOwnerCluster(proxmoxCluster)
+			proxmoxCluster = refreshCluster(proxmoxCluster)
+			setCapiClusterOwnerRefOnProxmoxCluster(proxmoxCluster, capiCluster)
+
+			assertProxmoxClusterIsReady(proxmoxCluster)
+			assertSecretHasUserLabels(secret, proxmoxCluster)
+			assertSecretHasNumberOfOwnerRefs(secret, 1)
+			assertSecretHasOwnerRef(secret, "another-cluster")
+			assertSecretHasFinalizer(secret, infrav1.SecretFinalizer)
+
+			By("the other cluster's owner reference still counting as a user")
+			deleteCapiCluster(capiCluster)
+			deleteProxmoxCluster(proxmoxCluster)
+			assertProxmoxClusterIsDeleted(proxmoxCluster)
+			assertSecretHasUserLabels(secret)
+			assertSecretHasNumberOfOwnerRefs(secret, 1)
+			assertSecretHasFinalizer(secret, infrav1.SecretFinalizer)
+
+			cleanup(proxmoxCluster, capiCluster, secret)
+		})
 	})
 
 	It("should remove ProxmoxCluster finalizer if the secret does not exist", func() {
@@ -447,6 +567,68 @@ func createSecret() *corev1.Secret {
 	}
 	Expect(k8sClient.Create(testEnv.GetContext(), secret)).To(Succeed())
 	return secret
+}
+
+// otherNamespace is a namespace no ProxmoxCluster of these tests lives in,
+// created on first use.
+func otherNamespace() string {
+	const name = "credentials"
+	ns := &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: name}}
+	if err := k8sClient.Create(testEnv.GetContext(), ns); err != nil {
+		Expect(apierrors.IsAlreadyExists(err)).To(BeTrue())
+	}
+	return name
+}
+
+// createSecretIn creates a credentials Secret in the given namespace.
+func createSecretIn(namespace string) *corev1.Secret {
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			GenerateName: "secret-",
+			Namespace:    namespace,
+		},
+		Data: map[string][]byte{
+			"url":    []byte("url"),
+			"token":  []byte("token"),
+			"secret": []byte("secret"),
+		},
+	}
+	Expect(k8sClient.Create(testEnv.GetContext(), secret)).To(Succeed())
+	return secret
+}
+
+// setOwnerRefsOnSecret replaces the Secret's owner references.
+func setOwnerRefsOnSecret(secret *corev1.Secret, ownerRefs ...metav1.OwnerReference) {
+	Eventually(func() error {
+		ph, err := patch.NewHelper(secret, testEnv)
+		Expect(err).ShouldNot(HaveOccurred())
+		secret.OwnerReferences = ownerRefs
+		return ph.Patch(testEnv.GetContext(), secret)
+	}).WithTimeout(time.Second * 10).
+		WithPolling(time.Second).
+		Should(Succeed())
+}
+
+// assertSecretHasUserLabels waits until the Secret's user labels are exactly
+// those of the given ProxmoxClusters.
+func assertSecretHasUserLabels(secret *corev1.Secret, users ...*infrav1.ProxmoxCluster) {
+	want := make([]string, 0, len(users))
+	for _, user := range users {
+		want = append(want, infrav1.SecretUserLabelPrefix+string(user.UID))
+	}
+	key := client.ObjectKey{Namespace: secret.Namespace, Name: secret.Name}
+	Eventually(func(g Gomega) {
+		g.Expect(testEnv.Get(testEnv.GetContext(), key, secret)).To(Succeed())
+		got := []string{}
+		for label := range secret.Labels {
+			if strings.HasPrefix(label, infrav1.SecretUserLabelPrefix) {
+				got = append(got, label)
+			}
+		}
+		g.Expect(got).To(ConsistOf(want))
+	}).WithTimeout(time.Second * 10).
+		WithPolling(time.Second).
+		Should(Succeed())
 }
 
 func createProxmoxCluster() *infrav1.ProxmoxCluster {

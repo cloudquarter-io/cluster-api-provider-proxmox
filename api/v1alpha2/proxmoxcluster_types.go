@@ -41,6 +41,11 @@ const (
 	ClusterFinalizer = "proxmoxcluster.infrastructure.cluster.x-k8s.io"
 	// SecretFinalizer is the finalizer for ProxmoxCluster credentials secrets.
 	SecretFinalizer = "proxmoxcluster.infrastructure.cluster.x-k8s.io/secret" //nolint:gosec
+
+	// SecretUserLabelPrefix is the prefix of the label a ProxmoxCluster sets on
+	// a credentials secret of another namespace it reads. The label's name is
+	// the ProxmoxCluster's UID.
+	SecretUserLabelPrefix = "user.proxmoxcluster.infrastructure.cluster.x-k8s.io/" //nolint:gosec
 )
 
 // ProxmoxClusterSpec defines the desired state of a ProxmoxCluster.
