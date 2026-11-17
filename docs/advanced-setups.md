@@ -488,6 +488,10 @@ reference cannot cross namespaces: Kubernetes deletes an object whose owner it
 does not find in the object's own namespace. Such a Secret belongs to whoever
 created it, and is theirs to delete.
 
+When a ProxmoxCluster of another namespace starts to use a Secret, the owner
+reference of a ProxmoxCluster that no longer exists or is being deleted is
+removed from it, so that the Secret is not deleted with that cluster.
+
 Only ProxmoxClusters count as users: an owner reference of another kind does
 not keep the finalizer. A user label names its ProxmoxCluster by UID, so it does
 not follow a ProxmoxCluster that is created again, by a restore for example, and
@@ -499,6 +503,11 @@ A Secret of another namespace that an earlier version made the ProxmoxCluster an
 owner of is already marked for deletion, and Kubernetes removes it when its last
 user releases it. The owner references are replaced with labels, but the mark
 cannot be taken back: create the Secret again once it is gone.
+
+The owner reference is replaced on the Secrets a ProxmoxCluster reads. A Secret
+of another namespace that it stopped reading under the earlier version, a
+zone's whose zone was dropped, keeps its owner reference and the finalizer:
+remove both by hand.
 
 ## Custom Allowed Nodes for ProxmoxMachine
 
