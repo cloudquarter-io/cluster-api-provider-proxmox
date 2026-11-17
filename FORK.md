@@ -21,6 +21,9 @@ additive and contributable upstream.
 - Per-zone endpoint and clone inputs on `ZoneConfigSpec`: `credentialsRef`,
   `templateSource`, `storage` and `networkDevices`. See
   `docs/advanced-setups.md`, "One Proxmox cluster per zone".
+- A credentials Secret in another namespace than its ProxmoxCluster is
+  recorded as used with a label, not an owner reference, so Kubernetes does
+  not delete it. See `docs/advanced-setups.md`, "Credentials Secrets".
 
 ## Releases
 

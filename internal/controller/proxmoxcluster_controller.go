@@ -21,13 +21,17 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/pkg/errors"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/equality"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
@@ -35,7 +39,6 @@ import (
 	clusterutil "sigs.k8s.io/cluster-api/util"
 	"sigs.k8s.io/cluster-api/util/annotations"
 	"sigs.k8s.io/cluster-api/util/conditions"
-	"sigs.k8s.io/cluster-api/util/patch"
 	"sigs.k8s.io/cluster-api/util/predicates"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
@@ -178,6 +181,10 @@ func (r *ProxmoxClusterReconciler) reconcileDelete(ctx context.Context, clusterS
 	}
 
 	if err := r.reconcileDeleteCredentialsSecret(ctx, clusterScope); err != nil {
+		if apierrors.IsConflict(err) {
+			clusterScope.Info("credentials Secret changed while it was being written, retrying")
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
 		return reconcile.Result{}, err
 	}
 
@@ -219,6 +226,12 @@ func (r *ProxmoxClusterReconciler) reconcileNormal(ctx context.Context, clusterS
 	r.reconcileFailureDomains(clusterScope)
 
 	if err := r.reconcileNormalCredentialsSecret(ctx, clusterScope); err != nil {
+		if apierrors.IsConflict(err) {
+			// Someone else wrote the Secret meanwhile. That says nothing about
+			// Proxmox: read the Secret again.
+			clusterScope.Info("credentials Secret changed while it was being written, retrying")
+			return ctrl.Result{RequeueAfter: time.Second}, nil
+		}
 		reason := infrav1.ProxmoxClusterProxmoxAvailableProxmoxUnreachableReason
 		if apierrors.IsNotFound(err) {
 			reason = infrav1.ProxmoxClusterProxmoxAvailableCredentialsNotFoundReason
@@ -315,14 +328,13 @@ func (r *ProxmoxClusterReconciler) reconcileFailureDomains(clusterScope *scope.C
 	pc.Status.FailureDomains = faildoms
 }
 
-// reconcileNormalCredentialsSecret makes the ProxmoxCluster an owner of every
-// credentials Secret it reads, its own and each zone's, and protects each
-// with the Secret finalizer so none can be deleted under the machines that
-// are reached through it. A Secret the cluster owns but no longer reads,
+// reconcileNormalCredentialsSecret records the ProxmoxCluster as a user of
+// every credentials Secret it reads, its own and each zone's, and protects
+// each with the Secret finalizer so none can be deleted under the machines
+// that are reached through it. A Secret the cluster uses but no longer reads,
 // because its zone or reference went, is released again.
 func (r *ProxmoxClusterReconciler) reconcileNormalCredentialsSecret(ctx context.Context, clusterScope *scope.ClusterScope) error {
 	proxmoxCluster := clusterScope.ProxmoxCluster
-	ownerRef := credentialsOwnerRef(proxmoxCluster)
 	referenced := make(map[client.ObjectKey]bool)
 	for _, secretKey := range credentialsSecretKeys(proxmoxCluster) {
 		referenced[secretKey] = true
@@ -330,60 +342,148 @@ func (r *ProxmoxClusterReconciler) reconcileNormalCredentialsSecret(ctx context.
 		if err := r.Client.Get(ctx, secretKey, secret); err != nil {
 			return err
 		}
-
-		helper, err := patch.NewHelper(secret, r.Client)
-		if err != nil {
-			return err
-		}
-
-		// Ensure the ProxmoxCluster is an owner and that the APIVersion is up-to-date.
-		secret.SetOwnerReferences(clusterutil.EnsureOwnerRef(secret.GetOwnerReferences(), ownerRef))
-
-		// Ensure the finalizer is added.
-		if !ctrlutil.ContainsFinalizer(secret, infrav1.SecretFinalizer) {
-			ctrlutil.AddFinalizer(secret, infrav1.SecretFinalizer)
-		}
-
-		if err := helper.Patch(ctx, secret); err != nil {
+		if err := r.useCredentialsSecret(ctx, proxmoxCluster, secret); err != nil {
 			return err
 		}
 	}
 
-	return r.releaseUnreferencedCredentialsSecrets(ctx, proxmoxCluster, referenced)
+	// The cluster lives on without the Secrets it stopped reading: the owner
+	// reference goes too, or the Secret would be collected with the cluster
+	// later.
+	return r.releaseCredentialsSecrets(ctx, proxmoxCluster, referenced, true)
 }
 
-// releaseUnreferencedCredentialsSecrets releases the Secrets of the
-// ProxmoxCluster's namespace that carry its owner reference but are no
-// longer among the ones it reads credentials from: a zone or a reference
-// dropped from the spec must not leave its Secret owned and finalized, or a
-// later deletion of the cluster would leave it terminating forever.
-func (r *ProxmoxClusterReconciler) releaseUnreferencedCredentialsSecrets(ctx context.Context, proxmoxCluster *infrav1.ProxmoxCluster, referenced map[client.ObjectKey]bool) error {
-	ownerRef := credentialsOwnerRef(proxmoxCluster)
-	secrets := &corev1.SecretList{}
-	if err := r.Client.List(ctx, secrets, client.InNamespace(proxmoxCluster.GetNamespace())); err != nil {
+// useCredentialsSecret records the ProxmoxCluster as a user of a credentials
+// Secret and puts the Secret finalizer on it. A Secret of the ProxmoxCluster's
+// namespace gets its owner reference. A Secret of another namespace gets its
+// user label instead: an owner reference cannot cross namespaces, and the
+// garbage collector deletes a Secret whose owner it does not find in the
+// Secret's namespace. An owner reference an earlier version wrote on such a
+// Secret is removed, and so is the owner reference of a ProxmoxCluster that
+// no longer uses the Secret, with which it would be collected.
+func (r *ProxmoxClusterReconciler) useCredentialsSecret(ctx context.Context, proxmoxCluster *infrav1.ProxmoxCluster, secret *corev1.Secret) error {
+	original := secret.DeepCopy()
+
+	if secret.GetNamespace() == proxmoxCluster.GetNamespace() {
+		// Ensure the ProxmoxCluster is an owner and that the APIVersion is up-to-date.
+		secret.SetOwnerReferences(clusterutil.EnsureOwnerRef(secret.GetOwnerReferences(), credentialsOwnerRef(proxmoxCluster)))
+	} else {
+		labels := secret.GetLabels()
+		if labels == nil {
+			labels = map[string]string{}
+		}
+		labels[credentialsUserLabel(proxmoxCluster)] = ""
+		secret.SetLabels(labels)
+		removeCredentialsOwnerRef(proxmoxCluster, secret)
+		if err := r.removeDanglingCredentialsOwnerRefs(ctx, secret); err != nil {
+			return err
+		}
+	}
+
+	// A Secret that is being deleted takes no new finalizer.
+	if secret.GetDeletionTimestamp().IsZero() {
+		ctrlutil.AddFinalizer(secret, infrav1.SecretFinalizer)
+	}
+
+	return r.patchCredentialsSecret(ctx, original, secret)
+}
+
+// patchCredentialsSecret writes the changes made to a credentials Secret
+// since original, and fails if the Secret changed in between: the clusters
+// that use one Secret must not overwrite each other's finalizer.
+func (r *ProxmoxClusterReconciler) patchCredentialsSecret(ctx context.Context, original, secret *corev1.Secret) error {
+	if equality.Semantic.DeepEqual(original.ObjectMeta, secret.ObjectMeta) {
+		return nil
+	}
+	return r.Client.Patch(ctx, secret, client.MergeFromWithOptions(original, client.MergeFromWithOptimisticLock{}))
+}
+
+// removeDanglingCredentialsOwnerRefs removes from the Secret the owner
+// references of ProxmoxClusters that no longer use it and with which it would
+// be collected: those that no longer exist, and those that are being deleted
+// and have released it. A ProxmoxCluster of the Secret's namespace that is
+// deleted as its last user takes the finalizer off and leaves its owner
+// reference, for the Secret to be collected with it; a ProxmoxCluster of
+// another namespace that starts to use the Secret before then would lose it.
+// While the Secret carries the finalizer, a ProxmoxCluster that is being
+// deleted has not released it, and still reaches its machines through it: its
+// owner reference stays, and goes with its own release.
+func (r *ProxmoxClusterReconciler) removeDanglingCredentialsOwnerRefs(ctx context.Context, secret *corev1.Secret) error {
+	owned := false
+	for _, ref := range secret.GetOwnerReferences() {
+		owned = owned || isProxmoxClusterOwnerRef(ref)
+	}
+	if !owned {
+		return nil
+	}
+
+	proxmoxClusters := &infrav1.ProxmoxClusterList{}
+	if err := r.Client.List(ctx, proxmoxClusters); err != nil {
 		return err
 	}
-	for i := range secrets.Items {
-		secret := &secrets.Items[i]
-		if referenced[client.ObjectKeyFromObject(secret)] || !clusterutil.HasOwnerRef(secret.GetOwnerReferences(), ownerRef) {
-			continue
+	finalized := ctrlutil.ContainsFinalizer(secret, infrav1.SecretFinalizer)
+	using := make(map[types.UID]bool, len(proxmoxClusters.Items))
+	for i := range proxmoxClusters.Items {
+		if proxmoxClusters.Items[i].GetDeletionTimestamp().IsZero() || finalized {
+			using[proxmoxClusters.Items[i].GetUID()] = true
 		}
-		// The cluster lives on without this Secret: the owner reference goes
-		// too, or the Secret would be collected with the cluster later.
-		if err := r.releaseCredentialsSecret(ctx, secret, ownerRef, true); err != nil {
+	}
+
+	var kept []metav1.OwnerReference
+	for _, ref := range secret.GetOwnerReferences() {
+		if !isProxmoxClusterOwnerRef(ref) || using[ref.UID] {
+			kept = append(kept, ref)
+		}
+	}
+	secret.SetOwnerReferences(kept)
+	return nil
+}
+
+// releaseCredentialsSecrets releases every Secret the ProxmoxCluster is
+// recorded as a user of, other than those in skip: the Secrets of any
+// namespace that carry its user label, and the Secrets of its namespace that
+// carry its owner reference. A Secret left recorded and finalized would
+// terminate forever once it is deleted.
+func (r *ProxmoxClusterReconciler) releaseCredentialsSecrets(ctx context.Context, proxmoxCluster *infrav1.ProxmoxCluster, skip map[client.ObjectKey]bool, dropOwnerRef bool) error {
+	released := make(map[client.ObjectKey]bool)
+	for _, used := range []client.ListOption{
+		client.HasLabels{credentialsUserLabel(proxmoxCluster)},
+		client.InNamespace(proxmoxCluster.GetNamespace()),
+	} {
+		secrets := &corev1.SecretList{}
+		if err := r.Client.List(ctx, secrets, used); err != nil {
 			return err
+		}
+		for i := range secrets.Items {
+			key := client.ObjectKeyFromObject(&secrets.Items[i])
+			if skip[key] || released[key] {
+				continue
+			}
+			released[key] = true
+			// A Secret that does not record the ProxmoxCluster is left as it is.
+			if err := r.releaseCredentialsSecret(ctx, proxmoxCluster, &secrets.Items[i], dropOwnerRef); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
 }
 
+// isProxmoxClusterOwnerRef reports whether the owner reference names a
+// ProxmoxCluster, in any version of its API.
+func isProxmoxClusterOwnerRef(ref metav1.OwnerReference) bool {
+	gv, err := schema.ParseGroupVersion(ref.APIVersion)
+	return err == nil && gv.Group == infrav1.GroupVersion.Group && ref.Kind == infrav1.ProxmoxClusterKind
+}
+
 // reconcileDeleteCredentialsSecret releases every credentials Secret the
-// ProxmoxCluster owns, its own and each zone's: the owner reference goes, and
-// the finalizer with it when no other owner remains.
+// ProxmoxCluster uses: the ones it reads, its own and each zone's, and any
+// other it is still recorded as a user of. Its user label or owner reference
+// goes, and the finalizer with it when no other user remains.
 func (r *ProxmoxClusterReconciler) reconcileDeleteCredentialsSecret(ctx context.Context, clusterScope *scope.ClusterScope) error {
 	proxmoxCluster := clusterScope.ProxmoxCluster
-	ownerRef := credentialsOwnerRef(proxmoxCluster)
 
+	released := make(map[client.ObjectKey]bool)
 	for _, secretKey := range credentialsSecretKeys(proxmoxCluster) {
 		secret := &corev1.Secret{}
 		if err := r.Client.Get(ctx, secretKey, secret); err != nil {
@@ -392,42 +492,114 @@ func (r *ProxmoxClusterReconciler) reconcileDeleteCredentialsSecret(ctx context.
 			}
 			return err
 		}
-		if err := r.releaseCredentialsSecret(ctx, secret, ownerRef, false); err != nil {
+		if err := r.releaseCredentialsSecret(ctx, proxmoxCluster, secret, false); err != nil {
 			return err
 		}
+		released[secretKey] = true
 	}
 
-	return nil
+	// A Secret the cluster no longer reads loses its owner reference too, as
+	// it would have on the next reconcile: it is not collected with the
+	// cluster.
+	return r.releaseCredentialsSecrets(ctx, proxmoxCluster, released, true)
 }
 
-// releaseCredentialsSecret takes the ProxmoxCluster off a Secret it owns:
-// the owner reference goes when other owners remain, and the finalizer goes
-// when the ProxmoxCluster was the only owner. On deletion the sole owner
-// reference stays, so the Secret is collected with the cluster as before;
+// releaseCredentialsSecret takes the ProxmoxCluster off a Secret it uses.
+// The users of a Secret are its ProxmoxCluster owner references and its user
+// labels. While another user remains, only the ProxmoxCluster's own label and
+// owner reference go; when it was the last user, the finalizer goes too. On
+// deletion the sole owner reference of a Secret of the ProxmoxCluster's
+// namespace stays, so the Secret is collected with the cluster as before;
 // dropOwnerRef removes it as well, for a Secret the living cluster stopped
-// reading.
-func (r *ProxmoxClusterReconciler) releaseCredentialsSecret(ctx context.Context, secret *corev1.Secret, ownerRef metav1.OwnerReference, dropOwnerRef bool) error {
-	helper, err := patch.NewHelper(secret, r.Client)
-	if err != nil {
-		return err
+// reading. A Secret of another namespace never keeps the owner reference, and
+// so outlives the cluster.
+func (r *ProxmoxClusterReconciler) releaseCredentialsSecret(ctx context.Context, proxmoxCluster *infrav1.ProxmoxCluster, secret *corev1.Secret, dropOwnerRef bool) error {
+	userLabel := credentialsUserLabel(proxmoxCluster)
+	_, labelled := secret.GetLabels()[userLabel]
+	owned := ownsCredentialsSecret(proxmoxCluster, secret)
+	if !labelled && !owned {
+		return nil
 	}
 
-	switch {
-	case len(secret.GetOwnerReferences()) > 1:
-		// Remove the ProxmoxCluster from the OwnerRef.
-		secret.SetOwnerReferences(clusterutil.RemoveOwnerRef(secret.GetOwnerReferences(), ownerRef))
-	case clusterutil.HasOwnerRef(secret.GetOwnerReferences(), ownerRef):
-		// There is only one OwnerRef, the current ProxmoxCluster. Remove the Finalizer (if present).
-		if ctrlutil.ContainsFinalizer(secret, infrav1.SecretFinalizer) {
-			ctrl.LoggerFrom(ctx).Info(fmt.Sprintf("Removing finalizer %s", infrav1.SecretFinalizer), "Secret", klog.KObj(secret))
-			ctrlutil.RemoveFinalizer(secret, infrav1.SecretFinalizer)
-		}
-		if dropOwnerRef {
-			secret.SetOwnerReferences(clusterutil.RemoveOwnerRef(secret.GetOwnerReferences(), ownerRef))
-		}
+	original := secret.DeepCopy()
+	otherUsers := credentialsSecretUsers(secret)
+	if labelled {
+		otherUsers--
+		labels := secret.GetLabels()
+		delete(labels, userLabel)
+		secret.SetLabels(labels)
+	}
+	if owned {
+		otherUsers--
 	}
 
-	return helper.Patch(ctx, secret)
+	crossNamespace := secret.GetNamespace() != proxmoxCluster.GetNamespace()
+	if otherUsers == 0 && ctrlutil.ContainsFinalizer(secret, infrav1.SecretFinalizer) {
+		ctrl.LoggerFrom(ctx).Info(fmt.Sprintf("Removing finalizer %s", infrav1.SecretFinalizer), "Secret", klog.KObj(secret))
+		ctrlutil.RemoveFinalizer(secret, infrav1.SecretFinalizer)
+	}
+	if otherUsers > 0 || dropOwnerRef || crossNamespace {
+		removeCredentialsOwnerRef(proxmoxCluster, secret)
+	}
+
+	return r.patchCredentialsSecret(ctx, original, secret)
+}
+
+// ownsCredentialsSecret reports whether the Secret carries the
+// ProxmoxCluster's owner reference. In the ProxmoxCluster's namespace the
+// reference is matched by name, as Cluster API does. In another namespace it
+// is matched by UID: a ProxmoxCluster of the Secret's namespace may have the
+// same name.
+func ownsCredentialsSecret(proxmoxCluster *infrav1.ProxmoxCluster, secret *corev1.Secret) bool {
+	if secret.GetNamespace() == proxmoxCluster.GetNamespace() {
+		return clusterutil.HasOwnerRef(secret.GetOwnerReferences(), credentialsOwnerRef(proxmoxCluster))
+	}
+	for _, ref := range secret.GetOwnerReferences() {
+		if ref.UID == proxmoxCluster.GetUID() {
+			return true
+		}
+	}
+	return false
+}
+
+// removeCredentialsOwnerRef removes the ProxmoxCluster's owner reference from
+// the Secret, matched as ownsCredentialsSecret matches it.
+func removeCredentialsOwnerRef(proxmoxCluster *infrav1.ProxmoxCluster, secret *corev1.Secret) {
+	if secret.GetNamespace() == proxmoxCluster.GetNamespace() {
+		secret.SetOwnerReferences(clusterutil.RemoveOwnerRef(secret.GetOwnerReferences(), credentialsOwnerRef(proxmoxCluster)))
+		return
+	}
+	var kept []metav1.OwnerReference
+	for _, ref := range secret.GetOwnerReferences() {
+		if ref.UID != proxmoxCluster.GetUID() {
+			kept = append(kept, ref)
+		}
+	}
+	secret.SetOwnerReferences(kept)
+}
+
+// credentialsUserLabel is the label the ProxmoxCluster sets on the
+// credentials Secrets of another namespace it reads.
+func credentialsUserLabel(proxmoxCluster *infrav1.ProxmoxCluster) string {
+	return infrav1.SecretUserLabelPrefix + string(proxmoxCluster.GetUID())
+}
+
+// credentialsSecretUsers counts the users of a credentials Secret: its
+// ProxmoxCluster owner references and its user labels. An owner reference of
+// another kind is not a user, and does not keep the finalizer.
+func credentialsSecretUsers(secret *corev1.Secret) int {
+	users := 0
+	for _, ref := range secret.GetOwnerReferences() {
+		if isProxmoxClusterOwnerRef(ref) {
+			users++
+		}
+	}
+	for label := range secret.GetLabels() {
+		if strings.HasPrefix(label, infrav1.SecretUserLabelPrefix) {
+			users++
+		}
+	}
+	return users
 }
 
 // credentialsOwnerRef is the owner reference the ProxmoxCluster sets on the
