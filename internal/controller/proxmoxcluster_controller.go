@@ -30,6 +30,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
@@ -383,31 +384,20 @@ func (r *ProxmoxClusterReconciler) patchCredentialsSecret(ctx context.Context, o
 }
 
 // releaseCredentialsSecrets releases every Secret the ProxmoxCluster is
-// recorded as a user of, other than those in skip: the Secrets of its
-// namespace that carry its owner reference and the Secrets of any namespace
-// that carry its user label. A Secret left recorded and finalized would
-// terminate forever once it is deleted.
+// recorded as a user of, other than those in skip: the Secrets of any
+// namespace that carry its user label or its owner reference. A Secret left
+// recorded and finalized would terminate forever once it is deleted.
 func (r *ProxmoxClusterReconciler) releaseCredentialsSecrets(ctx context.Context, proxmoxCluster *infrav1.ProxmoxCluster, skip map[client.ObjectKey]bool, dropOwnerRef bool) error {
-	owned := &corev1.SecretList{}
-	if err := r.Client.List(ctx, owned, client.InNamespace(proxmoxCluster.GetNamespace())); err != nil {
+	secrets := &corev1.SecretList{}
+	if err := r.Client.List(ctx, secrets); err != nil {
 		return err
 	}
-	labelled := &corev1.SecretList{}
-	if err := r.Client.List(ctx, labelled, client.HasLabels{credentialsUserLabel(proxmoxCluster)}); err != nil {
-		return err
-	}
-
-	released := make(map[client.ObjectKey]bool)
-	for _, secrets := range [][]corev1.Secret{owned.Items, labelled.Items} {
-		for i := range secrets {
-			key := client.ObjectKeyFromObject(&secrets[i])
-			if skip[key] || released[key] {
-				continue
-			}
-			released[key] = true
-			if err := r.releaseCredentialsSecret(ctx, proxmoxCluster, &secrets[i], dropOwnerRef); err != nil {
-				return err
-			}
+	for i := range secrets.Items {
+		if skip[client.ObjectKeyFromObject(&secrets.Items[i])] {
+			continue
+		}
+		if err := r.releaseCredentialsSecret(ctx, proxmoxCluster, &secrets.Items[i], dropOwnerRef); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -518,10 +508,17 @@ func credentialsUserLabel(proxmoxCluster *infrav1.ProxmoxCluster) string {
 	return infrav1.SecretUserLabelPrefix + string(proxmoxCluster.GetUID())
 }
 
-// credentialsSecretUsers counts the users of a credentials Secret: its owner
-// references and its user labels.
+// credentialsSecretUsers counts the users of a credentials Secret: its
+// ProxmoxCluster owner references and its user labels. An owner reference of
+// another kind is not a user, and does not keep the finalizer.
 func credentialsSecretUsers(secret *corev1.Secret) int {
-	users := len(secret.GetOwnerReferences())
+	users := 0
+	for _, ref := range secret.GetOwnerReferences() {
+		gv, err := schema.ParseGroupVersion(ref.APIVersion)
+		if err == nil && gv.Group == infrav1.GroupVersion.Group && ref.Kind == infrav1.ProxmoxClusterKind {
+			users++
+		}
+	}
 	for label := range secret.GetLabels() {
 		if strings.HasPrefix(label, infrav1.SecretUserLabelPrefix) {
 			users++
