@@ -759,7 +759,7 @@ func assertSecretHasOwnerUIDs(secret *corev1.Secret, owners ...*infrav1.ProxmoxC
 	key := client.ObjectKey{Namespace: secret.Namespace, Name: secret.Name}
 	Eventually(func(g Gomega) {
 		g.Expect(testEnv.Get(testEnv.GetContext(), key, secret)).To(Succeed())
-		got := []types.UID{}
+		got := make([]types.UID, 0, len(secret.OwnerReferences))
 		for _, ref := range secret.OwnerReferences {
 			got = append(got, ref.UID)
 		}
