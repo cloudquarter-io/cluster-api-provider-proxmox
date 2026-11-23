@@ -94,11 +94,11 @@ func reconcileBootstrapData(ctx context.Context, machineScope *scope.MachineScop
 	}
 	if err != nil {
 		// Todo: test this (colliding default gateways for example)
-		// A VM Proxmox failed to attach the ISO to has not been started, so a
+		// A VM Proxmox VE failed to take the ISO has not been started, so a
 		// new one runs the bootstrap from scratch; data that does not render
 		// would fail the same way again.
 		reason := infrav1.ProxmoxMachineVirtualMachineProvisionedVMProvisionFailedReason
-		if errors.As(err, new(inject.ProxmoxError)) {
+		if errors.As(err, new(inject.ISOError)) {
 			reason = infrav1.ProxmoxMachineVirtualMachineProvisionedVMProvisionRetryingReason
 		}
 		conditions.Set(machineScope.ProxmoxMachine, metav1.Condition{

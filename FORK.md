@@ -9,8 +9,8 @@ additive and contributable upstream.
 ## Branches
 
 - `cloudquarter` is the integration branch and the default. It is upstream
-  `main` plus the changes below, and is rebased onto upstream when upstream
-  releases.
+  `main` plus the changes below; upstream is merged into it when upstream
+  releases (see "Syncing with upstream").
 - `main` mirrors upstream and is never committed to.
 - Work lands through pull requests against `cloudquarter`.
 
@@ -24,6 +24,35 @@ additive and contributable upstream.
 - A credentials Secret in another namespace than its ProxmoxCluster is
   recorded as used with a label, not an owner reference, so Kubernetes does
   not delete it. See `docs/advanced-setups.md`, "Credentials Secrets".
+
+## Syncing with upstream
+
+When upstream releases, merge upstream `main` into `cloudquarter` through a
+pull request:
+
+1. Fast-forward the fork's `main` to upstream `main`
+   (`git push origin upstream/main:main`).
+2. On a branch from `cloudquarter`, `git merge upstream/main`, resolve the
+   conflicts and open the pull request against `cloudquarter`.
+3. Land it with a merge commit, not a squash. A squash hides upstream's
+   commits from Git, and the next sync conflicts on the same lines again.
+
+Where upstream and the fork fixed the same thing, keep upstream's names and
+the fork's behaviour unless the pull request says otherwise. A bootstrap ISO
+Proxmox VE fails to take (upstream's `inject.ISOError`) clones a new VM under
+the reprovisioning limit; upstream retries the same VM.
+
+Machine code reaches Proxmox VE through `MachineScope.ProxmoxClient()`, which
+resolves the machine's zone. Upstream code calls
+`machineScope.InfraCluster.ProxmoxClient`, the ProxmoxCluster's default
+client; it compiles after a merge and reaches the wrong Proxmox cluster, or
+none when every zone carries its own `credentialsRef`.
+`TestMachineCodeReachesProxmoxThroughItsZone` in `pkg/scope` fails on it.
+
+Do not push upstream's tags to the fork. A `v*` tag runs the release
+workflows at the tagged commit: it would publish a plain upstream release as
+the fork's latest and an upstream image to the fork's registry. Never run
+`git push --tags` from a clone that fetched upstream.
 
 ## Releases
 

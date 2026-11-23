@@ -32,14 +32,15 @@ import (
 // CloudInitISODevice default device used to inject cdrom iso.
 const CloudInitISODevice = "ide0"
 
-// ProxmoxError is an error Proxmox returned while the ISO was attached; a rendering error is not one.
-type ProxmoxError struct {
+// ISOError is an error from Proxmox VE while uploading or attaching the ISO. Unlike an error
+// rendering its contents, it can go away when retried.
+type ISOError struct {
 	Err error
 }
 
-func (e ProxmoxError) Error() string { return e.Err.Error() }
+func (e ISOError) Error() string { return e.Err.Error() }
 
-func (e ProxmoxError) Unwrap() error { return e.Err }
+func (e ISOError) Unwrap() error { return e.Err }
 
 // ISOInjector used to Inject cloudinit userdata, metadata and network-config into a Proxmox VirtualMachine.
 type ISOInjector struct {
@@ -85,7 +86,7 @@ func (i *ISOInjector) injectCloudInit(ctx context.Context) error {
 	// Inject an ISO with userdata, metadata and network-config into the VirtualMachine.
 	err = i.VirtualMachine.CloudInit(ctx, CloudInitISODevice, string(i.BootstrapData), string(metadata), "", string(network))
 	if err != nil {
-		return errors.Wrap(ProxmoxError{err}, "unable to inject CloudInit ISO")
+		return ISOError{errors.Wrap(err, "unable to inject CloudInit ISO")}
 	}
 
 	return nil
@@ -122,7 +123,7 @@ func (i *ISOInjector) injectIgnition(ctx context.Context) error {
 	// Inject an ISO with ignition userdata, metadata and an empty network-config v1 into the VirtualMachine.
 	err = i.VirtualMachine.CloudInit(ctx, CloudInitISODevice, string(bootstrapData), string(metadata), "", string(cloudinit.EmptyNetworkV1))
 	if err != nil {
-		return errors.Wrap(ProxmoxError{err}, "unable to inject ignition userdata iso")
+		return ISOError{errors.Wrap(err, "unable to inject ignition userdata iso")}
 	}
 
 	return nil
