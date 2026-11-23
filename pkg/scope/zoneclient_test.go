@@ -18,49 +18,82 @@ package scope
 
 import (
 	"go/ast"
-	"go/parser"
-	"go/token"
-	"io/fs"
-	"path/filepath"
+	"go/types"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	"golang.org/x/tools/go/packages"
 )
 
-// TestMachineCodeReachesProxmoxThroughItsZone fails when code reaches Proxmox VE for a machine
-// through the ProxmoxCluster's default client (machineScope.InfraCluster.ProxmoxClient) instead of
-// MachineScope.ProxmoxClient. The default client reaches the ProxmoxCluster's own endpoint, not the
-// Proxmox cluster of the machine's zone, and is nil when every zone carries its own credentialsRef.
-// Code merged from upstream uses the default client, and it compiles, so this test finds it.
+const (
+	modulePath       = "github.com/ionos-cloud/cluster-api-provider-proxmox"
+	scopePackagePath = modulePath + "/pkg/scope"
+	clientPackage    = modulePath + "/pkg/proxmox"
+)
+
+// TestMachineCodeReachesProxmoxThroughItsZone fails when production code outside this package reads
+// a ProxmoxClient field holding the ProxmoxCluster's default client (ClusterScope.ProxmoxClient,
+// a reconciler's ProxmoxClient, ...) for any use but handing it to ClusterScopeParams. The default
+// client reaches the ProxmoxCluster's own endpoint, not the Proxmox cluster of a machine's zone, and
+// is nil when every zone carries its own credentialsRef. Machine code uses MachineScope.ProxmoxClient().
+// Code merged from upstream reads the field, and it compiles, so this test finds it by its type, not
+// by its spelling.
 func TestMachineCodeReachesProxmoxThroughItsZone(t *testing.T) {
+	pkgs, err := packages.Load(&packages.Config{
+		Mode: packages.NeedName | packages.NeedFiles | packages.NeedSyntax | packages.NeedTypes | packages.NeedTypesInfo,
+		Dir:  "../..",
+	}, "./...")
+	require.NoError(t, err)
+
 	var found []string
-	for _, root := range []string{"../../internal", "../../pkg", "../../cmd"} {
-		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
-			if err != nil {
-				return err
-			}
-			if d.IsDir() || !strings.HasSuffix(path, ".go") {
-				return nil
-			}
-			fset := token.NewFileSet()
-			file, err := parser.ParseFile(fset, path, nil, parser.SkipObjectResolution)
-			if err != nil {
-				return err
-			}
+	for _, pkg := range pkgs {
+		for _, e := range pkg.Errors {
+			t.Errorf("%s: %s", pkg.PkgPath, e)
+		}
+		if pkg.PkgPath == scopePackagePath || pkg.TypesInfo == nil {
+			continue
+		}
+		for _, file := range pkg.Syntax {
+			handedToScope := map[ast.Expr]bool{}
 			ast.Inspect(file, func(n ast.Node) bool {
-				sel, ok := n.(*ast.SelectorExpr)
-				if !ok || sel.Sel.Name != "ProxmoxClient" {
+				lit, ok := n.(*ast.CompositeLit)
+				if !ok || !isClusterScopeParams(pkg.TypesInfo.TypeOf(lit)) {
 					return true
 				}
-				if inner, ok := sel.X.(*ast.SelectorExpr); ok && inner.Sel.Name == "InfraCluster" {
-					found = append(found, fset.Position(sel.Pos()).String())
+				for _, elt := range lit.Elts {
+					if kv, ok := elt.(*ast.KeyValueExpr); ok {
+						if key, ok := kv.Key.(*ast.Ident); ok && key.Name == "ProxmoxClient" {
+							handedToScope[kv.Value] = true
+						}
+					}
 				}
 				return true
 			})
-			return nil
-		})
-		require.NoError(t, err)
+			ast.Inspect(file, func(n ast.Node) bool {
+				sel, ok := n.(*ast.SelectorExpr)
+				if !ok || handedToScope[sel] {
+					return true
+				}
+				if s := pkg.TypesInfo.Selections[sel]; s != nil && s.Kind() == types.FieldVal &&
+					s.Obj().Name() == "ProxmoxClient" && isProxmoxClient(s.Type()) {
+					found = append(found, pkg.Fset.Position(sel.Pos()).String())
+				}
+				return true
+			})
+		}
 	}
 	require.Empty(t, found, "use MachineScope.ProxmoxClient(), which reaches the machine's zone")
+}
+
+func isClusterScopeParams(t types.Type) bool {
+	named, ok := types.Unalias(t).(*types.Named)
+	return ok && named.Obj().Pkg() != nil && named.Obj().Pkg().Path() == scopePackagePath &&
+		named.Obj().Name() == "ClusterScopeParams"
+}
+
+func isProxmoxClient(t types.Type) bool {
+	named, ok := types.Unalias(t).(*types.Named)
+	return ok && named.Obj().Pkg() != nil && strings.TrimSuffix(named.Obj().Pkg().Path(), "/") == clientPackage &&
+		named.Obj().Name() == "Client"
 }
