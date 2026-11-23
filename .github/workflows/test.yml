@@ -16,6 +16,10 @@ on:
   pull_request_target: {}
   push:
     branches: ["main", "cloudquarter"]
+  # A maintainer runs a branch's own copy of this workflow (gh workflow run
+  # test.yml --ref <branch>), for a change pull_request_target cannot test:
+  # the workflow itself, the Go version or the test image.
+  workflow_dispatch: {}
 
 permissions:
   contents: read
@@ -235,6 +239,8 @@ jobs:
         with:
           args: >
             -Dproject.settings=${{ env.SONAR_CONFIG_DIR }}/sonar-project.properties
+            ${{ vars.SONAR_ORGANIZATION && format('-Dsonar.organization={0}', vars.SONAR_ORGANIZATION) || '' }}
+            ${{ vars.SONAR_PROJECT_KEY && format('-Dsonar.projectKey={0}', vars.SONAR_PROJECT_KEY) || '' }}
             -Dsonar.go.coverage.reportPaths=${{ runner.temp }}/go-coverage/cover.out
             -Dsonar.coverageReportPaths=${{ runner.temp }}/sh-coverage/sonarqube.xml
             -Dsonar.projectBaseDir=pr
@@ -247,11 +253,13 @@ jobs:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
       - name: SonarQube
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
         uses: SonarSource/sonarqube-scan-action@4d1dc0c91ee400dcf8a6dddf2f705ac36542e304 # v8.4.0
         with:
           args: >
             -Dproject.settings=${{ env.SONAR_CONFIG_DIR }}/sonar-project.properties
+            ${{ vars.SONAR_ORGANIZATION && format('-Dsonar.organization={0}', vars.SONAR_ORGANIZATION) || '' }}
+            ${{ vars.SONAR_PROJECT_KEY && format('-Dsonar.projectKey={0}', vars.SONAR_PROJECT_KEY) || '' }}
             -Dsonar.go.coverage.reportPaths=${{ runner.temp }}/go-coverage/cover.out
             -Dsonar.coverageReportPaths=${{ runner.temp }}/sh-coverage/sonarqube.xml
             -Dsonar.projectBaseDir=pr

@@ -106,3 +106,19 @@ Go toolchain `go.mod` declares; on a newer local Go run it as
 `GOTOOLCHAIN=go1.26.11 bin/golangci-lint-kube-api-linter run --config .golangci-kal.yml ./...`.
 The e2e workflows need a Proxmox lab the fork does not have; pull requests
 carry the `e2e/none` label.
+
+The Test workflow's `sonar` job reports to the fork's own SonarQube Cloud
+project, on the Free plan: it analyses the main branch (`cloudquarter`) and
+pull requests into it, not other branches. The repository variables
+`SONAR_ORGANIZATION` and `SONAR_PROJECT_KEY` name it; the workflow passes them
+to the scanner, so `sonar-project.properties` stays as upstream has it. The
+token is the `SONAR_TOKEN` secret of the `sonar` environment. Automatic
+Analysis stays off in SonarQube Cloud: the workflow analyses in CI.
+
+Pull requests run the Test workflow of the base branch (`pull_request_target`),
+so a pull request that changes the workflow, the Go version or the test image
+fails `test-go` with the old one. Run the branch's own copy before merging:
+`gh workflow run test.yml --repo cloudquarter-io/cluster-api-provider-proxmox --ref <branch>`.
+Its `test-go` and `test-sh` are the checks that count: its `sonar` job stops at
+the quality gate, which the Free plan does not report for a branch other than
+the main one.
