@@ -51,16 +51,19 @@ request:
 Where upstream and the fork fixed the same thing, keep upstream's names and
 the fork's behaviour unless the pull request says otherwise. A bootstrap ISO
 Proxmox VE fails to take (upstream's `inject.ISOError`) clones a new VM under
-the reprovisioning limit; upstream retries the same VM.
+the reprovisioning limit; upstream retries the same VM. With
+`--provision-retry-limit=0` the failure is final.
 
 Machine code reaches Proxmox VE through `MachineScope.ProxmoxClient()`, which
 resolves the machine's zone. Upstream code reads the ProxmoxCluster's default
 client, for example `machineScope.InfraCluster.ProxmoxClient`; it compiles
 after a merge and reaches the wrong Proxmox cluster, or none when every zone
 carries its own `credentialsRef`. `TestMachineCodeReachesProxmoxThroughItsZone`
-in `pkg/scope` fails on any read of a default-client field outside the
-ClusterScope's own file (`pkg/scope/cluster.go`), however it is spelled,
-other than handing it to `ClusterScopeParams`.
+in `pkg/scope` fails on any read of a default-client field in production code
+(test files are not checked) outside the ClusterScope's own file,
+`pkg/scope/cluster.go`, however it is spelled, other than handing it to
+`ClusterScopeParams`. Code that is not a machine's, such as the ProxmoxCluster
+controller's, uses `ClusterScope.ProxmoxClientForZone`.
 
 Do not push upstream's tags to the fork. A `v*` tag runs the workflows of
 the tagged commit, upstream's: `container-image` would push an image built

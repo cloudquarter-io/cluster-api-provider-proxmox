@@ -310,6 +310,11 @@ previous wait. The annotation `provision.capmox.cluster.x-k8s.io/reprovisions`
 counts them. After the last one the reason is `VMProvisionFailed`; a
 MachineHealthCheck that targets the Machine then replaces it.
 
+The release manifest sets the limit; the manager's own default, without it,
+is `0`. With `0`, a bootstrap ISO Proxmox VE failed to take is final as well,
+even when the error was transient: no new VM is cloned and the same VM is not
+retried.
+
 A VM that received its bootstrap data may have registered its Node, which
 keeps the deleted VM's providerID; CAPMOX deletes that Node from the workload
 cluster before it clones the new VM.

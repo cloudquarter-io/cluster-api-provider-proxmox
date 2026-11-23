@@ -89,7 +89,8 @@ func TestMachineCodeReachesProxmoxThroughItsZone(t *testing.T) {
 			})
 		}
 	}
-	require.Empty(t, found, "use MachineScope.ProxmoxClient(), which reaches the machine's zone")
+	require.Empty(t, found, "use MachineScope.ProxmoxClient(), which reaches the machine's zone, "+
+		"or ClusterScope.ProxmoxClientForZone outside machine code")
 }
 
 func isClusterScopeParams(t types.Type) bool {
