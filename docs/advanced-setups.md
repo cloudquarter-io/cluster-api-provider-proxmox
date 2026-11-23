@@ -292,20 +292,29 @@ Some provisioning failures are fixed by a new VM. CAPMOX deletes the VM and
 clones a new one under the same ProxmoxMachine, which keeps its IP address
 claims and bootstrap data:
 
-- Proxmox fails to attach the bootstrap ISO.
-- A Proxmox task of the clone or configuration fails.
+- Proxmox fails to take the bootstrap ISO: its upload or its attach.
+- A Proxmox task the machine waits on fails: the clone, the configuration,
+  the boot disk resize or the IP tag. A failure a new VM cannot fix, such as
+  a storage that cannot grow the disk, takes every new VM before it is
+  final. A failed start is retried on the same VM.
 - Cloud-init fails on a worker, for example a `kubeadm join` that ends while
   the control plane is being replaced.
 
 The condition reason is `VMProvisionRetrying`, or `TaskFailed` for a failed
 Proxmox task, until the new VM is cloned. A
 machine clones at most `--provision-retry-limit` new VMs (default
-`${CAPMOX_PROVISION_RETRY_LIMIT:=3}`; `0` makes every failure final), the
+`${CAPMOX_PROVISION_RETRY_LIMIT:=3}` in the release manifest, `0` in the
+manager without it; `0` clones none), the
 first after `--provision-retry-backoff` (default
 `${CAPMOX_PROVISION_RETRY_BACKOFF:=30s}`), each later one after twice the
 previous wait. The annotation `provision.capmox.cluster.x-k8s.io/reprovisions`
 counts them. After the last one the reason is `VMProvisionFailed`; a
 MachineHealthCheck that targets the Machine then replaces it.
+
+A bootstrap ISO Proxmox VE failed to take is the exception: once no new VM is
+allowed, the same VM, which has not started, takes the ISO again. The reason
+is `WaitingForBootstrapDataReconciliation` while it does, and the machine
+does not fail on that error.
 
 A VM that received its bootstrap data may have registered its Node, which
 keeps the deleted VM's providerID; CAPMOX deletes that Node from the workload

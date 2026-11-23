@@ -154,6 +154,23 @@ func TestEnsureVirtualMachine_CreateVM_FullOptions(t *testing.T) {
 	requireConditionIsFalse(t, machineScope.ProxmoxMachine, infrav1.ProxmoxMachineVirtualMachineProvisionedCondition)
 }
 
+func TestEnsureVirtualMachine_CreateVM_CloneAlreadyStarted(t *testing.T) {
+	machineScope, _, kubeClient := setupReconcilerTestWithCondition(t, infrav1.ProxmoxMachineVirtualMachineProvisionedCloningReason)
+
+	// The stored ProxmoxMachine has the previous reconcile's clone, the scope's copy predates it.
+	stored := &infrav1.ProxmoxMachine{}
+	require.NoError(t, kubeClient.Get(context.Background(), client.ObjectKeyFromObject(machineScope.ProxmoxMachine), stored))
+	stored.Spec.VirtualMachineID = new(int64(123))
+	require.NoError(t, kubeClient.Update(context.Background(), stored))
+	stored.Status.TaskRef = new("UPID:node1:00000001:00000001:00000001:qmclone:123:root@pam:")
+	require.NoError(t, kubeClient.Status().Update(context.Background(), stored))
+
+	requeue, err := ensureVirtualMachine(context.Background(), machineScope)
+	require.NoError(t, err)
+	require.True(t, requeue)
+	require.Nil(t, machineScope.ProxmoxMachine.Status.TaskRef)
+}
+
 func TestEnsureVirtualMachine_CreateVM_FullOptions_TemplateSelector(t *testing.T) {
 	vmTemplateTags := []string{"foo", "bar"}
 
@@ -558,6 +575,27 @@ func TestReconcileVirtualMachineConfig_NoConfig(t *testing.T) {
 	requeue, err := reconcileVirtualMachineConfig(context.Background(), machineScope)
 	require.NoError(t, err)
 	require.False(t, requeue)
+	require.Equal(t, infrav1.ProxmoxMachineVirtualMachineProvisionedWaitingForDiskReconciliationReason,
+		conditions.GetReason(machineScope.ProxmoxMachine, infrav1.ProxmoxMachineVirtualMachineProvisionedCondition))
+}
+
+// A VM that needs no configuration, such as one whose configure task's status update was lost,
+// must go on to be started rather than be reported ready.
+func TestReconcileVM_NoConfigChangeIsNotReady(t *testing.T) {
+	machineScope, proxmoxClient, _ := setupReconcilerTestWithCondition(t, infrav1.ProxmoxMachineVirtualMachineProvisionedCloningReason)
+	vm := newStoppedVM()
+	vm.VMID = 123
+	vm.VirtualMachineConfig.Description = machineScope.ProxmoxMachine.GetName()
+	machineScope.SetVirtualMachineID(int64(vm.VMID))
+
+	proxmoxClient.EXPECT().GetVM(context.Background(), "node1", int64(123)).Return(vm, nil)
+	proxmoxClient.EXPECT().HasActiveTask(context.Background(), vm).Return(false, nil)
+
+	result, err := ReconcileVM(context.Background(), machineScope)
+	require.NoError(t, err)
+	require.NotEqual(t, infrav1.VirtualMachineStateReady, result.State)
+	require.NotEqual(t, infrav1.ProxmoxMachineVirtualMachineProvisionedCloningReason,
+		conditions.GetReason(machineScope.ProxmoxMachine, infrav1.ProxmoxMachineVirtualMachineProvisionedCondition))
 }
 
 func TestReconcileVirtualMachineConfig_ApplyConfig(t *testing.T) {
@@ -641,13 +679,15 @@ func TestReconcileVirtualMachineConfigTags(t *testing.T) {
 }
 
 func TestReconcileDisks_RunningVM(t *testing.T) {
-	machineScope, _, _ := setupReconcilerTestWithCondition(t, infrav1.ProxmoxMachineVirtualMachineProvisionedCloningReason)
+	machineScope, _, _ := setupReconcilerTestWithCondition(t, infrav1.ProxmoxMachineVirtualMachineProvisionedWaitingForDiskReconciliationReason)
 	machineScope.ProxmoxMachine.Spec.Disks = &infrav1.Storage{
 		BootVolume: &infrav1.DiskSize{Disk: "ide0", SizeGB: 100},
 	}
 	machineScope.SetVirtualMachine(newRunningVM())
 
-	require.NoError(t, reconcileDisks(context.Background(), machineScope))
+	requeue, err := reconcileDisks(context.Background(), machineScope)
+	require.NoError(t, err)
+	require.False(t, requeue)
 }
 
 func TestReconcileDisks_ResizeDisk(t *testing.T) {
@@ -661,7 +701,75 @@ func TestReconcileDisks_ResizeDisk(t *testing.T) {
 	task := newTask()
 	proxmoxClient.EXPECT().ResizeDisk(context.Background(), vm, "ide0", machineScope.ProxmoxMachine.Spec.Disks.BootVolume.FormatSize()).Return(task, nil)
 
-	require.NoError(t, reconcileDisks(context.Background(), machineScope))
+	requeue, err := reconcileDisks(context.Background(), machineScope)
+	require.NoError(t, err)
+	require.True(t, requeue)
+	require.Equal(t, string(task.UPID), *machineScope.ProxmoxMachine.Status.TaskRef)
+	require.Equal(t, infrav1.ProxmoxMachineVirtualMachineProvisionedWaitingForStaticIPAllocationReason,
+		conditions.GetReason(machineScope.ProxmoxMachine, infrav1.ProxmoxMachineVirtualMachineProvisionedCondition))
+}
+
+func TestReconcileDisks_ResizeDiskFailed(t *testing.T) {
+	machineScope, proxmoxClient, _ := setupReconcilerTestWithCondition(t, infrav1.ProxmoxMachineVirtualMachineProvisionedWaitingForDiskReconciliationReason)
+	machineScope.ProxmoxMachine.Spec.Disks = &infrav1.Storage{
+		BootVolume: &infrav1.DiskSize{Disk: "ide0", SizeGB: 100},
+	}
+	vm := newStoppedVM()
+	machineScope.SetVirtualMachine(vm)
+
+	proxmoxClient.EXPECT().ResizeDisk(context.Background(), vm, "ide0", machineScope.ProxmoxMachine.Spec.Disks.BootVolume.FormatSize()).Return(nil, fmt.Errorf("resize failed"))
+
+	requeue, err := reconcileDisks(context.Background(), machineScope)
+	require.Error(t, err)
+	require.False(t, requeue)
+	require.Nil(t, machineScope.ProxmoxMachine.Status.TaskRef)
+}
+
+func TestReconcileVM_WaitsForActiveTask(t *testing.T) {
+	machineScope, proxmoxClient, _ := setupReconcilerTestWithCondition(t, infrav1.ProxmoxMachineVirtualMachineProvisionedWaitingForDiskReconciliationReason)
+	machineScope.ProxmoxMachine.Spec.Disks = &infrav1.Storage{
+		BootVolume: &infrav1.DiskSize{Disk: "scsi0", SizeGB: 100},
+	}
+	vm := newStoppedVM()
+	machineScope.SetVirtualMachineID(123)
+
+	proxmoxClient.EXPECT().GetVM(context.Background(), "node1", int64(123)).Return(vm, nil).Once()
+	proxmoxClient.EXPECT().HasActiveTask(context.Background(), vm).Return(true, nil).Once()
+
+	result, err := ReconcileVM(context.Background(), machineScope)
+	require.NoError(t, err)
+	require.Equal(t, infrav1.VirtualMachineStatePending, result.State)
+	require.Equal(t, infrav1.ProxmoxMachineVirtualMachineProvisionedWaitingForDiskReconciliationReason,
+		conditions.GetReason(machineScope.ProxmoxMachine, infrav1.ProxmoxMachineVirtualMachineProvisionedCondition))
+}
+
+func TestReconcileVM_WaitsForCloneLock(t *testing.T) {
+	machineScope, proxmoxClient, _ := setupReconcilerTestWithCondition(t, infrav1.ProxmoxMachineVirtualMachineProvisionedCloningReason)
+	machineScope.ProxmoxMachine.Status.TaskRef = nil
+	vm := newStoppedVM()
+	vm.Lock = "clone"
+	machineScope.SetVirtualMachineID(123)
+
+	proxmoxClient.EXPECT().GetVM(context.Background(), "node1", int64(123)).Return(vm, nil).Once()
+	proxmoxClient.EXPECT().HasActiveTask(context.Background(), vm).Return(false, nil).Maybe()
+
+	result, err := ReconcileVM(context.Background(), machineScope)
+	require.NoError(t, err)
+	require.Equal(t, infrav1.VirtualMachineStatePending, result.State)
+	require.Equal(t, infrav1.ProxmoxMachineVirtualMachineProvisionedCloningReason,
+		conditions.GetReason(machineScope.ProxmoxMachine, infrav1.ProxmoxMachineVirtualMachineProvisionedCondition))
+}
+
+func TestReconcileVM_ActiveTaskError(t *testing.T) {
+	machineScope, proxmoxClient, _ := setupReconcilerTestWithCondition(t, infrav1.ProxmoxMachineVirtualMachineProvisionedWaitingForDiskReconciliationReason)
+	vm := newStoppedVM()
+	machineScope.SetVirtualMachineID(123)
+
+	proxmoxClient.EXPECT().GetVM(context.Background(), "node1", int64(123)).Return(vm, nil).Once()
+	proxmoxClient.EXPECT().HasActiveTask(context.Background(), vm).Return(false, fmt.Errorf("unavailable")).Once()
+
+	_, err := ReconcileVM(context.Background(), machineScope)
+	require.ErrorContains(t, err, "unavailable")
 }
 
 func TestReconcileMachineAddresses_IPv4(t *testing.T) {
@@ -983,6 +1091,7 @@ func TestReconcileVM_StateMachine(t *testing.T) {
 	// Round 1: clone task complete; ConfigureVM sets VM options and requeues.
 	proxmoxClient.EXPECT().GetTask(context.Background(), "result").Return(task, nil).Once()
 	proxmoxClient.EXPECT().GetVM(context.Background(), "node2", int64(123)).Return(vm, nil).Once()
+	proxmoxClient.EXPECT().HasActiveTask(context.Background(), vm).Return(false, nil).Once()
 
 	expectedVMConfigureRequest := []any{
 		proxmox.VirtualMachineOption{Name: optionSockets, Value: *machineScope.ProxmoxMachine.Spec.NumSockets},
@@ -1005,12 +1114,31 @@ func TestReconcileVM_StateMachine(t *testing.T) {
 		),
 	)
 
-	// Round 2: ConfigureVM task has completed; reconcileDisks resizes the boot volume,
-	// then reconcileIPAddresses advances the state to WaitingForBootstrapData.
-	// We're not mocking the entirety of a network setup.
+	// Round 2: ConfigureVM task has completed; reconcileDisks starts the boot volume resize
+	// and requeues, so reconcileIPAddresses waits for the resize task.
 	proxmoxClient.EXPECT().GetTask(context.Background(), "result").Return(task, nil).Once()
 	proxmoxClient.EXPECT().GetVM(context.Background(), "node2", int64(123)).Return(vm, nil).Once()
-	proxmoxClient.EXPECT().ResizeDisk(context.Background(), vm, "scsi0", "50G").Return(nil, nil).Once()
+	proxmoxClient.EXPECT().HasActiveTask(context.Background(), vm).Return(false, nil).Once()
+	proxmoxClient.EXPECT().ResizeDisk(context.Background(), vm, "scsi0", "50G").Return(task, nil).Once()
+
+	result, err = ReconcileVM(context.Background(), machineScope)
+	require.NoError(t, err)
+	require.Equal(t, infrav1.VirtualMachineStatePending, result.State)
+	require.Equal(t, string(task.UPID), *machineScope.ProxmoxMachine.Status.TaskRef)
+	require.Equal(
+		t,
+		infrav1.ProxmoxMachineVirtualMachineProvisionedWaitingForStaticIPAllocationReason,
+		conditions.GetReason(
+			machineScope.ProxmoxMachine,
+			infrav1.ProxmoxMachineVirtualMachineProvisionedCondition,
+		),
+	)
+
+	// Once the resize task has completed, reconcileIPAddresses advances the state to
+	// WaitingForBootstrapData. We're not mocking the entirety of a network setup.
+	proxmoxClient.EXPECT().GetTask(context.Background(), "result").Return(task, nil).Once()
+	proxmoxClient.EXPECT().GetVM(context.Background(), "node2", int64(123)).Return(vm, nil).Once()
+	proxmoxClient.EXPECT().HasActiveTask(context.Background(), vm).Return(false, nil).Once()
 
 	result, err = ReconcileVM(context.Background(), machineScope)
 	require.NoError(t, err)
@@ -1036,6 +1164,7 @@ func TestReconcileVM_StateMachine(t *testing.T) {
 	)
 
 	proxmoxClient.EXPECT().GetVM(context.Background(), "node2", int64(123)).Return(vm, nil).Once()
+	proxmoxClient.EXPECT().HasActiveTask(context.Background(), vm).Return(false, nil).Once()
 	proxmoxClient.EXPECT().StartVM(context.Background(), vm).Return(newTask(), nil).Once()
 
 	// Provide IPAddresses fields to fake network bootstrap.
@@ -1270,6 +1399,42 @@ func TestReprovisionVM_FailsOnceTheLimitIsUsed(t *testing.T) {
 			require.True(t, machineScope.HasFailed())
 			require.Equal(t, tc.message, conditions.Get(machineScope.ProxmoxMachine, infrav1.ProxmoxMachineVirtualMachineProvisionedCondition).Message)
 			require.Equal(t, int64(123), machineScope.GetVirtualMachineID())
+		})
+	}
+}
+
+func TestReprovisionVM_RetriesTheSameVMForAnISOErrorOnceTheLimitIsUsed(t *testing.T) {
+	for _, tc := range []struct {
+		name, done string
+		limit      int
+	}{
+		{name: "limit used", done: "3", limit: 3},
+		{name: "retries disabled", done: "", limit: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			machineScope, _ := retryingMachine(t)
+			conditions.Set(machineScope.ProxmoxMachine, metav1.Condition{
+				Type:    infrav1.ProxmoxMachineVirtualMachineProvisionedCondition,
+				Status:  metav1.ConditionFalse,
+				Reason:  infrav1.ProxmoxMachineVirtualMachineProvisionedVMProvisionRetryingReason,
+				Message: "failed to inject bootstrap data: unable to inject CloudInit ISO: 500 got no worker upid",
+			})
+			machineScope.ProxmoxMachine.Status.BootstrapDataProvided = nil
+			if tc.done != "" {
+				machineScope.SetAnnotation(reprovisionsAnnotation, tc.done)
+			}
+
+			wait, err := ReprovisionVM(context.Background(), nil, machineScope, ReprovisionPolicy{Limit: tc.limit, Backoff: 30 * time.Second})
+			require.NoError(t, err)
+			require.Equal(t, infrav1.DefaultReconcilerRequeue, wait)
+			require.False(t, machineScope.HasFailed())
+			require.Equal(t, infrav1.ProxmoxMachineVirtualMachineProvisionedWaitingForBootstrapDataReconciliationReason,
+				conditions.GetReason(machineScope.ProxmoxMachine, infrav1.ProxmoxMachineVirtualMachineProvisionedCondition))
+			require.Equal(t, "failed to inject bootstrap data: unable to inject CloudInit ISO: 500 got no worker upid",
+				conditions.Get(machineScope.ProxmoxMachine, infrav1.ProxmoxMachineVirtualMachineProvisionedCondition).Message)
+			require.Equal(t, int64(123), machineScope.GetVirtualMachineID())
+			require.Equal(t, tc.done, machineScope.ProxmoxMachine.Annotations[reprovisionsAnnotation])
+			require.False(t, NeedsReprovision(machineScope))
 		})
 	}
 }

@@ -9,8 +9,8 @@ additive and contributable upstream.
 ## Branches
 
 - `cloudquarter` is the integration branch and the default. It is upstream
-  `main` plus the changes below, and is rebased onto upstream when upstream
-  releases.
+  `main` plus the changes below; upstream is merged into it when upstream
+  releases (see "Syncing with upstream").
 - `main` mirrors upstream and is never committed to.
 - Work lands through pull requests against `cloudquarter`.
 
@@ -24,6 +24,54 @@ additive and contributable upstream.
 - A credentials Secret in another namespace than its ProxmoxCluster is
   recorded as used with a label, not an owner reference, so Kubernetes does
   not delete it. See `docs/advanced-setups.md`, "Credentials Secrets".
+- A zone's `dnsServers` reach the guest network configuration of the
+  machines placed in it.
+- `status.proxmoxNode` follows a VM Proxmox HA moved
+  (`--machine-location-resync`). See `docs/advanced-setups.md`, "VMs moved by
+  Proxmox HA".
+- A provisioning failure a new VM can fix clones one under the same
+  ProxmoxMachine, up to `--provision-retry-limit`. See
+  `docs/advanced-setups.md`, "Retrying a failed provisioning".
+- A running VM is stopped before it is deleted.
+
+## Syncing with upstream
+
+When upstream releases, merge the release into `cloudquarter` through a pull
+request:
+
+1. Fast-forward the fork's `main` to upstream `main`
+   (`git push origin upstream/main:main`).
+2. On a branch from `cloudquarter`, merge upstream's release tag, for example
+   `git merge v0.9.2`, not `upstream/main`, which can carry unreleased
+   commits. Resolve the conflicts and open the pull request against
+   `cloudquarter`.
+3. Land it with a merge commit, not a squash. A squash hides upstream's
+   commits from Git, and the next sync conflicts on the same lines again.
+
+Where upstream and the fork fixed the same thing, keep upstream's names and
+the fork's behaviour unless the pull request says otherwise. A bootstrap ISO
+Proxmox VE fails to take (upstream's `inject.ISOError`) clones a new VM under
+the reprovisioning limit; upstream retries the same VM. Once no new VM is
+allowed (`--provision-retry-limit=0`, or the limit used), the fork retries the
+same VM too, so the error is never final.
+
+Machine code reaches Proxmox VE through `MachineScope.ProxmoxClient()`, which
+resolves the machine's zone. Upstream code reads the ProxmoxCluster's default
+client, for example `machineScope.InfraCluster.ProxmoxClient`; it compiles
+after a merge and reaches the wrong Proxmox cluster, or none when every zone
+carries its own `credentialsRef`. `TestMachineCodeReachesProxmoxThroughItsZone`
+in `pkg/scope` fails on any read of a default-client field in production code
+(test files are not checked) outside the ClusterScope's own file,
+`pkg/scope/cluster.go`, however it is spelled, other than handing it to
+`ClusterScopeParams`. Code that is not a machine's, such as the ProxmoxCluster
+controller's, uses `ClusterScope.ProxmoxClientForZone`.
+
+Do not push upstream's tags to the fork. A `v*` tag runs the workflows of
+the tagged commit, upstream's: `container-image` would push an image built
+from upstream's code to the fork's registry under that tag, and `release`
+would leave a draft release whose manifest names upstream's image. Never run
+`git push --tags` from a clone that fetched upstream. The upstream tags up to
+`v0.9.1` came with the fork when it was created.
 
 ## Releases
 

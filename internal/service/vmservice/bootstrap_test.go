@@ -281,26 +281,37 @@ func TestReconcileBootstrapData_BadInjector(t *testing.T) {
 	require.False(t, requeue)
 	require.True(t, conditions.Has(machineScope.ProxmoxMachine, infrav1.ProxmoxMachineVirtualMachineProvisionedCondition))
 	require.Equal(t, infrav1.ProxmoxMachineVirtualMachineProvisionedVMProvisionFailedReason, conditions.GetReason(machineScope.ProxmoxMachine, infrav1.ProxmoxMachineVirtualMachineProvisionedCondition))
+	require.True(t, machineScope.HasFailed())
 	require.Nil(t, machineScope.ProxmoxMachine.Status.BootstrapDataProvided)
 }
 
-func TestReconcileBootstrapData_ProxmoxInjectErrorIsRetryable(t *testing.T) {
+// TestReconcileBootstrapData_ISOError marks the machine for a new VM when Proxmox VE fails to take the ISO:
+// the VM has not started, so a new one runs the bootstrap from scratch.
+func TestReconcileBootstrapData_ISOError(t *testing.T) {
 	machineScope, _, kubeClient := setupReconcilerTestWithCondition(t, infrav1.ProxmoxMachineVirtualMachineProvisionedWaitingForBootstrapDataReconciliationReason)
 	setupVMWithMetadata(machineScope)
 	createBootstrapSecret(t, kubeClient, machineScope, cloudinit.FormatCloudConfig)
+
+	// NetworkSetup
 	defaultPool := addDefaultIPPool(machineScope)
+
 	createIPPools(t, kubeClient, machineScope)
 	createIPAddress(t, kubeClient, machineScope, infrav1.DefaultNetworkDevice, "10.10.10.10", 0, &defaultPool)
 
+	errUpload := errors.New("500 got no worker upid - start worker failed")
 	getISOInjector = func(_ *proxmox.VirtualMachine, _ []byte, _, _ cloudinit.Renderer) isoInjector {
-		return FakeISOInjector{Error: fmt.Errorf("unable to inject CloudInit ISO: %w", inject.ProxmoxError{Err: errors.New("500 got no worker upid - start worker failed")})}
+		return FakeISOInjector{Error: inject.ISOError{Err: errUpload}}
 	}
 	t.Cleanup(func() { getISOInjector = defaultISOInjector })
 
-	_, err := reconcileBootstrapData(context.Background(), machineScope)
-	require.ErrorContains(t, err, "start worker failed")
-	require.Equal(t, infrav1.ProxmoxMachineVirtualMachineProvisionedVMProvisionRetryingReason, conditions.GetReason(machineScope.ProxmoxMachine, infrav1.ProxmoxMachineVirtualMachineProvisionedCondition))
+	requeue, err := reconcileBootstrapData(context.Background(), machineScope)
+	require.ErrorIs(t, err, errUpload)
+	require.False(t, requeue)
 	require.False(t, machineScope.HasFailed())
+	require.Equal(t, infrav1.ProxmoxMachineVirtualMachineProvisionedVMProvisionRetryingReason,
+		conditions.GetReason(machineScope.ProxmoxMachine, infrav1.ProxmoxMachineVirtualMachineProvisionedCondition))
+	require.True(t, NeedsReprovision(machineScope))
+	require.Nil(t, machineScope.ProxmoxMachine.Status.BootstrapDataProvided)
 }
 
 func TestGetBootstrapData_MissingSecretName(t *testing.T) {
