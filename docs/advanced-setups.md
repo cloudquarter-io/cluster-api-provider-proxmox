@@ -304,13 +304,17 @@ The condition reason is `VMProvisionRetrying`, or `TaskFailed` for a failed
 Proxmox task, until the new VM is cloned. A
 machine clones at most `--provision-retry-limit` new VMs (default
 `${CAPMOX_PROVISION_RETRY_LIMIT:=3}` in the release manifest, `0` in the
-manager without it; `0` makes every failure in this list final, a transient
-ISO error included), the
+manager without it; `0` clones none), the
 first after `--provision-retry-backoff` (default
 `${CAPMOX_PROVISION_RETRY_BACKOFF:=30s}`), each later one after twice the
 previous wait. The annotation `provision.capmox.cluster.x-k8s.io/reprovisions`
 counts them. After the last one the reason is `VMProvisionFailed`; a
 MachineHealthCheck that targets the Machine then replaces it.
+
+A bootstrap ISO Proxmox VE failed to take is the exception: once no new VM is
+allowed, the same VM, which has not started, takes the ISO again. The reason
+is `WaitingForBootstrapDataReconciliation` while it does, and the machine
+does not fail on that error.
 
 A VM that received its bootstrap data may have registered its Node, which
 keeps the deleted VM's providerID; CAPMOX deletes that Node from the workload

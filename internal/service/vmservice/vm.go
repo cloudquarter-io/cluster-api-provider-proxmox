@@ -232,11 +232,22 @@ func NeedsReprovision(s *scope.MachineScope) bool {
 
 // ReprovisionVM replaces the VM of a ProxmoxMachine NeedsReprovision reports. After the policy's backoff
 // it deletes the VM and resets the machine to clone a new one; the IP address claims and the bootstrap
-// data stay. Once the policy's new VMs are used up, the failure is final.
+// data stay. Once the policy's new VMs are used up, the failure is final, except a bootstrap ISO Proxmox
+// VE failed to take: that VM has not started, so it is retried instead.
 func ReprovisionVM(ctx context.Context, mgmt client.Client, s *scope.MachineScope, policy ReprovisionPolicy) (requeueAfter time.Duration, err error) {
 	cause := conditions.Get(s.ProxmoxMachine, infrav1.ProxmoxMachineVirtualMachineProvisionedCondition).Message
 	done, _ := strconv.Atoi(s.ProxmoxMachine.Annotations[reprovisionsAnnotation])
 	if done >= policy.Limit {
+		if bootstrapISOFailed(s) {
+			// The error can be transient, so the same VM takes the ISO again on the next reconcile.
+			conditions.Set(s.ProxmoxMachine, metav1.Condition{
+				Type:    infrav1.ProxmoxMachineVirtualMachineProvisionedCondition,
+				Status:  metav1.ConditionFalse,
+				Reason:  infrav1.ProxmoxMachineVirtualMachineProvisionedWaitingForBootstrapDataReconciliationReason,
+				Message: cause,
+			})
+			return infrav1.DefaultReconcilerRequeue, nil
+		}
 		conditions.Set(s.ProxmoxMachine, metav1.Condition{
 			Type:    infrav1.ProxmoxMachineVirtualMachineProvisionedCondition,
 			Status:  metav1.ConditionFalse,
@@ -291,6 +302,14 @@ func ReprovisionVM(ctx context.Context, mgmt client.Client, s *scope.MachineScop
 	s.Info("cloning a new vm", "reprovisions", done+1, "cause", cause)
 
 	return infrav1.DefaultReconcilerRequeue, nil
+}
+
+// bootstrapISOFailed reports a machine retrying because Proxmox VE failed to take its bootstrap ISO.
+// Cloud-init, the other failure retried this way, fails only after the VM received its bootstrap data.
+func bootstrapISOFailed(s *scope.MachineScope) bool {
+	return conditions.GetReason(s.ProxmoxMachine, infrav1.ProxmoxMachineVirtualMachineProvisionedCondition) ==
+		infrav1.ProxmoxMachineVirtualMachineProvisionedVMProvisionRetryingReason &&
+		!ptr.Deref(s.ProxmoxMachine.Status.BootstrapDataProvided, false)
 }
 
 // finalMessage is the condition message of a failure no new VM is cloned for.

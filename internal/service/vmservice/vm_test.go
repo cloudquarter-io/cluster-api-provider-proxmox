@@ -1403,6 +1403,42 @@ func TestReprovisionVM_FailsOnceTheLimitIsUsed(t *testing.T) {
 	}
 }
 
+func TestReprovisionVM_RetriesTheSameVMForAnISOErrorOnceTheLimitIsUsed(t *testing.T) {
+	for _, tc := range []struct {
+		name, done string
+		limit      int
+	}{
+		{name: "limit used", done: "3", limit: 3},
+		{name: "retries disabled", done: "", limit: 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			machineScope, _ := retryingMachine(t)
+			conditions.Set(machineScope.ProxmoxMachine, metav1.Condition{
+				Type:    infrav1.ProxmoxMachineVirtualMachineProvisionedCondition,
+				Status:  metav1.ConditionFalse,
+				Reason:  infrav1.ProxmoxMachineVirtualMachineProvisionedVMProvisionRetryingReason,
+				Message: "failed to inject bootstrap data: unable to inject CloudInit ISO: 500 got no worker upid",
+			})
+			machineScope.ProxmoxMachine.Status.BootstrapDataProvided = nil
+			if tc.done != "" {
+				machineScope.SetAnnotation(reprovisionsAnnotation, tc.done)
+			}
+
+			wait, err := ReprovisionVM(context.Background(), nil, machineScope, ReprovisionPolicy{Limit: tc.limit, Backoff: 30 * time.Second})
+			require.NoError(t, err)
+			require.Equal(t, infrav1.DefaultReconcilerRequeue, wait)
+			require.False(t, machineScope.HasFailed())
+			require.Equal(t, infrav1.ProxmoxMachineVirtualMachineProvisionedWaitingForBootstrapDataReconciliationReason,
+				conditions.GetReason(machineScope.ProxmoxMachine, infrav1.ProxmoxMachineVirtualMachineProvisionedCondition))
+			require.Equal(t, "failed to inject bootstrap data: unable to inject CloudInit ISO: 500 got no worker upid",
+				conditions.Get(machineScope.ProxmoxMachine, infrav1.ProxmoxMachineVirtualMachineProvisionedCondition).Message)
+			require.Equal(t, int64(123), machineScope.GetVirtualMachineID())
+			require.Equal(t, tc.done, machineScope.ProxmoxMachine.Annotations[reprovisionsAnnotation])
+			require.False(t, NeedsReprovision(machineScope))
+		})
+	}
+}
+
 // ownVM is the VM retryingMachine recorded: named after the machine, with its BIOS UUID.
 func ownVM() *lutherproxmox.VirtualMachine {
 	vm := namedVM("test")

@@ -81,6 +81,8 @@ var _ = Describe("ProxmoxMachineReconciler", func() {
 				Status: metav1.ConditionFalse,
 				Reason: infrav1.ProxmoxMachineVirtualMachineProvisionedVMProvisionRetryingReason,
 			})
+			// A failed cloud-init: the VM received its bootstrap data.
+			pm.Status.BootstrapDataProvided = new(true)
 			return &scope.MachineScope{Logger: &logger, Machine: &clusterv1.Machine{}, ProxmoxMachine: pm}, &scope.ClusterScope{Logger: &logger}
 		}
 
@@ -99,6 +101,17 @@ var _ = Describe("ProxmoxMachineReconciler", func() {
 			Expect(err).NotTo(HaveOccurred())
 			Expect(result.RequeueAfter).To(BeZero())
 			Expect(machineScope.HasFailed()).To(BeTrue())
+		})
+
+		It("should retry the same VM for a bootstrap ISO error when retries are disabled", func() {
+			machineScope, clusterScope := retrying()
+			machineScope.ProxmoxMachine.Status.BootstrapDataProvided = nil
+			result, err := (&ProxmoxMachineReconciler{}).reconcileNormal(context.Background(), machineScope, clusterScope)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(result.RequeueAfter).To(Equal(infrav1.DefaultReconcilerRequeue))
+			Expect(machineScope.HasFailed()).To(BeFalse())
+			Expect(conditions.GetReason(machineScope.ProxmoxMachine, infrav1.ProxmoxMachineVirtualMachineProvisionedCondition)).
+				To(Equal(infrav1.ProxmoxMachineVirtualMachineProvisionedWaitingForBootstrapDataReconciliationReason))
 		})
 	})
 })

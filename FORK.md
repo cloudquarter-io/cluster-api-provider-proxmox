@@ -51,8 +51,9 @@ request:
 Where upstream and the fork fixed the same thing, keep upstream's names and
 the fork's behaviour unless the pull request says otherwise. A bootstrap ISO
 Proxmox VE fails to take (upstream's `inject.ISOError`) clones a new VM under
-the reprovisioning limit; upstream retries the same VM. With
-`--provision-retry-limit=0` the failure is final.
+the reprovisioning limit; upstream retries the same VM. Once no new VM is
+allowed (`--provision-retry-limit=0`, or the limit used), the fork retries the
+same VM too, so the error is never final.
 
 Machine code reaches Proxmox VE through `MachineScope.ProxmoxClient()`, which
 resolves the machine's zone. Upstream code reads the ProxmoxCluster's default
