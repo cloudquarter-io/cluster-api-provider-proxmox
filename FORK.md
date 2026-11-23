@@ -58,9 +58,9 @@ resolves the machine's zone. Upstream code reads the ProxmoxCluster's default
 client, for example `machineScope.InfraCluster.ProxmoxClient`; it compiles
 after a merge and reaches the wrong Proxmox cluster, or none when every zone
 carries its own `credentialsRef`. `TestMachineCodeReachesProxmoxThroughItsZone`
-in `pkg/scope` fails on any read of a default-client field outside
-`pkg/scope`, however it is spelled, other than handing it to
-`ClusterScopeParams`.
+in `pkg/scope` fails on any read of a default-client field outside the
+ClusterScope's own file (`pkg/scope/cluster.go`), however it is spelled,
+other than handing it to `ClusterScopeParams`.
 
 Do not push upstream's tags to the fork. A `v*` tag runs the workflows of
 the tagged commit, upstream's: `container-image` would push an image built

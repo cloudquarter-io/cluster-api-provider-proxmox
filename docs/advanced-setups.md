@@ -294,9 +294,9 @@ claims and bootstrap data:
 
 - Proxmox fails to take the bootstrap ISO: its upload or its attach.
 - A Proxmox task the machine waits on fails: the clone, the configuration,
-  the boot disk resize, the IP tag or the start. A failure a new VM cannot
-  fix, such as a storage that cannot grow the disk, takes every new VM
-  before it is final.
+  the boot disk resize or the IP tag. A failure a new VM cannot fix, such as
+  a storage that cannot grow the disk, takes every new VM before it is
+  final. A failed start is retried on the same VM.
 - Cloud-init fails on a worker, for example a `kubeadm join` that ends while
   the control plane is being replaced.
 
