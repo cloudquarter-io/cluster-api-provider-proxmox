@@ -44,15 +44,31 @@ func (err InsufficientMemoryError) Error() string {
 		err.requested, err.node, err.available)
 }
 
+// NoFreeNodeError is returned for a control plane when nodes free of its
+// cluster's control planes exist but none has room. Unlike
+// InsufficientMemoryError it does not fail the machine: the reconcile is
+// retried until one of them has room.
+type NoFreeNodeError struct {
+	node      string
+	available uint64
+	requested uint64
+}
+
+func (err NoFreeNodeError) Error() string {
+	return fmt.Sprintf("waiting for a node free of the cluster's control planes: cannot reserve %dB of memory on node %s, the one with the most: %dB available memory left",
+		err.requested, err.node, err.available)
+}
+
 // ScheduleVM decides which node to a ProxmoxMachine should be scheduled on.
 // It requires the machine's ProxmoxCluster to have at least 1 allowed node.
 func ScheduleVM(ctx context.Context, machineScope *scope.MachineScope) (string, error) {
 	client := machineScope.ProxmoxClient()
-	schedulerHints := machineScope.InfraCluster.ProxmoxCluster.Spec.SchedulerHints
+	cluster := machineScope.InfraCluster.ProxmoxCluster
+	schedulerHints := cluster.Spec.SchedulerHints
 	controlPlane := util.IsControlPlaneMachine(machineScope.Machine)
-	locations := machineScope.InfraCluster.ProxmoxCluster.Status.NodeLocations.Workers
+	locations := cluster.Status.NodeLocations.Workers
 	if controlPlane {
-		locations = machineScope.InfraCluster.ProxmoxCluster.Status.NodeLocations.ControlPlane
+		locations = onEndpoint(cluster, ptr.Deref(machineScope.Zone(), ""), cluster.Status.NodeLocations.ControlPlane)
 	}
 
 	return selectNode(ctx, client, machineScope.ProxmoxMachine, locations, machineScope.AllowedNodes(), schedulerHints, controlPlane)
@@ -112,7 +128,7 @@ func selectNode(
 		// resource affinity would live-migrate one of them, the serving one
 		// included, as soon as the new one is registered.
 		if requestedMemory >= free[0].AvailableMemory {
-			return "", InsufficientMemoryError{
+			return "", NoFreeNodeError{
 				node:      free[0].Name,
 				available: free[0].AvailableMemory,
 				requested: requestedMemory,
@@ -141,6 +157,39 @@ func selectNode(
 	}
 
 	return decision, nil
+}
+
+// onEndpoint keeps the locations on the Proxmox cluster the zone reaches:
+// node names repeat across Proxmox clusters, so a control plane elsewhere
+// says nothing about a node here. Zones sharing a credentialsRef share a
+// Proxmox cluster; a zone without one, and a location without a zone, reach
+// the ProxmoxCluster's.
+func onEndpoint(cluster *infrav1.ProxmoxCluster, zone string, locations []infrav1.NodeLocation) []infrav1.NodeLocation {
+	want := endpointOf(cluster, zone)
+	var kept []infrav1.NodeLocation
+	for _, loc := range locations {
+		if endpointOf(cluster, ptr.Deref(loc.Zone, "")) == want {
+			kept = append(kept, loc)
+		}
+	}
+	return kept
+}
+
+// endpointOf names the credentials Secret that reaches the zone's Proxmox
+// cluster, "" for the controller's own credentials.
+func endpointOf(cluster *infrav1.ProxmoxCluster, zone string) string {
+	ref := cluster.Spec.CredentialsRef
+	if zc := cluster.GetZoneConfig(zone); zc != nil && zc.CredentialsRef != nil {
+		ref = zc.CredentialsRef
+	}
+	if ref == nil {
+		return ""
+	}
+	namespace := ref.Namespace
+	if namespace == "" {
+		namespace = cluster.Namespace
+	}
+	return namespace + "/" + ref.Name
 }
 
 // withoutReplicas returns the nodes that hold none of the scheduled VMs, in

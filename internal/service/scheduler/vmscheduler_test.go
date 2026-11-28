@@ -187,13 +187,21 @@ func TestSelectNodeControlPlaneNeverSharesANode(t *testing.T) {
 		locations := at("pve1", "pve3")
 
 		node, err := selectNode(context.Background(), client, machine, locations, allowedNodes, &infrav1.SchedulerHints{}, true)
-		require.Equal(t, InsufficientMemoryError{node: "pve2", available: miBytes(4), requested: miBytes(requestMiB)}, err)
+		require.Equal(t, NoFreeNodeError{node: "pve2", available: miBytes(4), requested: miBytes(requestMiB)}, err)
 		require.Empty(t, node)
 
 		// A worker with the same inputs still lands where memory allows.
 		node, err = selectNode(context.Background(), client, machine, locations, allowedNodes, &infrav1.SchedulerHints{}, false)
 		require.NoError(t, err)
 		require.Contains(t, []string{"pve1", "pve3"}, node)
+	})
+
+	t.Run("several free nodes: the one with the most memory", func(t *testing.T) {
+		client := fakeResourceClient{"pve1": miBytes(40), "pve2": miBytes(10), "pve3": miBytes(12)}
+
+		node, err := selectNode(context.Background(), client, machine, at("pve1"), allowedNodes, &infrav1.SchedulerHints{}, true)
+		require.NoError(t, err)
+		require.Equal(t, "pve3", node)
 	})
 
 	t.Run("every node holds one: the fewest with room", func(t *testing.T) {
@@ -203,6 +211,48 @@ func TestSelectNodeControlPlaneNeverSharesANode(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, "pve1", node)
 	})
+}
+
+func TestControlPlanesCountOnTheirOwnProxmoxCluster(t *testing.T) {
+	ref := func(namespace, name string) *corev1.SecretReference {
+		return &corev1.SecretReference{Namespace: namespace, Name: name}
+	}
+	cluster := &infrav1.ProxmoxCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "c", Namespace: "tenant"},
+		Spec: infrav1.ProxmoxClusterSpec{
+			CredentialsRef: ref("", "own"),
+			ZoneConfigs: []infrav1.ZoneConfigSpec{
+				{Zone: new("a1"), CredentialsRef: ref("capmox-system", "pve-a")},
+				{Zone: new("a2"), CredentialsRef: ref("capmox-system", "pve-a")},
+				{Zone: new("b"), CredentialsRef: ref("capmox-system", "pve-b")},
+				{Zone: new("plain")},
+				{Zone: new("own"), CredentialsRef: ref("tenant", "own")},
+			},
+		},
+	}
+	locations := []infrav1.NodeLocation{
+		{Machine: corev1.LocalObjectReference{Name: "in-a1"}, Node: "pve1", Zone: new("a1")},
+		{Machine: corev1.LocalObjectReference{Name: "in-a2"}, Node: "pve2", Zone: new("a2")},
+		{Machine: corev1.LocalObjectReference{Name: "in-b"}, Node: "pve1", Zone: new("b")},
+		{Machine: corev1.LocalObjectReference{Name: "in-plain"}, Node: "pve3", Zone: new("plain")},
+		{Machine: corev1.LocalObjectReference{Name: "zoneless"}, Node: "pve3"},
+		{Machine: corev1.LocalObjectReference{Name: "in-own"}, Node: "pve4", Zone: new("own")},
+	}
+	names := func(locs []infrav1.NodeLocation) []string {
+		out := make([]string, 0, len(locs))
+		for _, l := range locs {
+			out = append(out, l.Machine.Name)
+		}
+		return out
+	}
+
+	// Zones sharing a Secret share a Proxmox cluster; another Secret is another one.
+	require.Equal(t, []string{"in-a1", "in-a2"}, names(onEndpoint(cluster, "a2", locations)))
+	require.Equal(t, []string{"in-b"}, names(onEndpoint(cluster, "b", locations)))
+	// A zone without a Secret, no zone, and a zone naming the ProxmoxCluster's
+	// own Secret all reach the ProxmoxCluster's Proxmox cluster.
+	require.Equal(t, []string{"in-plain", "zoneless", "in-own"}, names(onEndpoint(cluster, "", locations)))
+	require.Equal(t, []string{"in-plain", "zoneless", "in-own"}, names(onEndpoint(cluster, "own", locations)))
 }
 
 func TestScheduleVM(t *testing.T) {
@@ -344,6 +394,70 @@ func TestScheduleVMWithFailureDomainNodes(t *testing.T) {
 	node, err := ScheduleVM(context.Background(), machineScope)
 	require.NoError(t, err)
 	require.Equal(t, "pve3", node)
+}
+
+func TestScheduleVMControlPlaneIgnoresAnotherProxmoxCluster(t *testing.T) {
+	ctrlClient := setupClient()
+
+	// Zone b is reached with the ProxmoxCluster's client; zone a is another
+	// Proxmox cluster whose nodes carry the same names.
+	proxmoxCluster := infrav1.ProxmoxCluster{
+		ObjectMeta: metav1.ObjectMeta{Name: "bar"},
+		Spec: infrav1.ProxmoxClusterSpec{
+			ZoneConfigs: []infrav1.ZoneConfigSpec{
+				{Zone: new("zone-a"), Nodes: []string{"pve1", "pve2"}, CredentialsRef: &corev1.SecretReference{Namespace: "capmox-system", Name: "pve-a"}},
+				{Zone: new("zone-b"), Nodes: []string{"pve1", "pve2"}},
+			},
+		},
+		Status: infrav1.ProxmoxClusterStatus{
+			NodeLocations: &infrav1.NodeLocations{
+				ControlPlane: []infrav1.NodeLocation{
+					{Machine: corev1.LocalObjectReference{Name: "cp-in-a"}, Node: "pve1", Zone: new("zone-a")},
+				},
+			},
+		},
+	}
+	require.NoError(t, ctrlClient.Create(context.Background(), &proxmoxCluster))
+
+	proxmoxMachine := &infrav1.ProxmoxMachine{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   "cp-in-b",
+			Labels: map[string]string{"cluster.x-k8s.io/cluster-name": "bar"},
+		},
+		Spec: infrav1.ProxmoxMachineSpec{MemoryMiB: new(int32(10))},
+	}
+
+	fakeProxmoxClient := proxmoxtest.NewMockClient(t)
+	cluster := &clusterv1.Cluster{ObjectMeta: metav1.ObjectMeta{Name: "bar", Namespace: "default"}}
+	machineScope, err := scope.NewMachineScope(scope.MachineScopeParams{
+		Client: ctrlClient,
+		Machine: &clusterv1.Machine{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "cp-in-b",
+				Namespace: "default",
+				Labels:    map[string]string{clusterv1.MachineControlPlaneLabel: ""},
+			},
+			Spec: clusterv1.MachineSpec{FailureDomain: "zone-b"},
+		},
+		Cluster: cluster,
+		InfraCluster: &scope.ClusterScope{
+			Cluster:        cluster,
+			ProxmoxCluster: &proxmoxCluster,
+			ProxmoxClient:  fakeProxmoxClient,
+		},
+		ProxmoxMachine: proxmoxMachine,
+		IPAMHelper:     &ipam.Helper{},
+	})
+	require.NoError(t, err)
+
+	// Only zone b's pve1 has room. zone a's control plane on its own pve1 does
+	// not make zone b's pve1 hold one.
+	fakeProxmoxClient.EXPECT().GetReservableMemoryBytes(context.Background(), "pve1", int64(100)).Return(miBytes(60), nil)
+	fakeProxmoxClient.EXPECT().GetReservableMemoryBytes(context.Background(), "pve2", int64(100)).Return(miBytes(5), nil)
+
+	node, err := ScheduleVM(context.Background(), machineScope)
+	require.NoError(t, err)
+	require.Equal(t, "pve1", node)
 }
 
 func TestInsufficientMemoryError_Error(t *testing.T) {

@@ -361,6 +361,27 @@ func TestEnsureVirtualMachine_CreateVM_SelectNode_InsufficientMemory(t *testing.
 	require.True(t, machineScope.HasFailed())
 }
 
+func TestEnsureVirtualMachine_CreateVM_SelectNode_NoFreeNode(t *testing.T) {
+	machineScope, _, _ := setupReconcilerTestWithCondition(t, infrav1.ProxmoxMachineVirtualMachineProvisionedCloningReason,
+		func(_ *clusterv1.Machine, infraCluster *infrav1.ProxmoxCluster, _ *infrav1.ProxmoxMachine) {
+			infraCluster.Spec.AllowedNodes = []string{"node1"}
+		})
+
+	selectNextNode = func(context.Context, *scope.MachineScope) (string, error) {
+		return "", fmt.Errorf("error: %w", scheduler.NoFreeNodeError{})
+	}
+	t.Cleanup(func() { selectNextNode = scheduler.ScheduleVM })
+
+	_, err := ensureVirtualMachine(context.Background(), machineScope)
+	require.ErrorAs(t, err, &scheduler.NoFreeNodeError{})
+
+	// The machine waits: the error is retried, never a terminal failure.
+	require.False(t, machineScope.HasFailed())
+	require.Equal(t, infrav1.ProxmoxMachineVirtualMachineProvisionedCloningFailedReason,
+		conditions.GetReason(machineScope.ProxmoxMachine, infrav1.ProxmoxMachineVirtualMachineProvisionedCondition))
+	require.False(t, machineScope.InfraCluster.ProxmoxCluster.HasMachine(machineScope.Name(), false))
+}
+
 func TestEnsureVirtualMachine_CreateVM_VMIDRange(t *testing.T) {
 	machineScope, proxmoxClient, _ := setupReconcilerTestWithCondition(t, infrav1.ProxmoxMachineVirtualMachineProvisionedCloningReason)
 	machineScope.ProxmoxMachine.Spec.VMIDRange = &infrav1.VMIDRange{
