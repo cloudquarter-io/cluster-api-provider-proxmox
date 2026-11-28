@@ -286,6 +286,18 @@ reconciled again every `--machine-location-resync` (default
 node the VM runs on now; `0` disables it. Deleting a machine finds its VM by
 VMID wherever it runs.
 
+## Control planes on separate nodes
+
+A control plane VM is cloned onto an allowed node that holds none of its
+cluster's control planes whenever such a node exists, the one with the most
+reservable memory. When none of those nodes has room, the machine waits: its
+`VirtualMachineProvisioned` condition is `CloningFailed` with a "waiting for a
+node free of the cluster's control planes" message, and the reconcile is
+retried until one has room. Only when every allowed node already holds one,
+as during a rollout surge, is it placed on the node with the fewest. Only the
+control planes on the machine's own Proxmox cluster count: zones sharing a
+`credentialsRef` share one. Workers are spread as before.
+
 ## Retrying a failed provisioning
 
 Some provisioning failures are fixed by a new VM. CAPMOX deletes the VM and
