@@ -49,12 +49,13 @@ func (err InsufficientMemoryError) Error() string {
 func ScheduleVM(ctx context.Context, machineScope *scope.MachineScope) (string, error) {
 	client := machineScope.ProxmoxClient()
 	schedulerHints := machineScope.InfraCluster.ProxmoxCluster.Spec.SchedulerHints
+	controlPlane := util.IsControlPlaneMachine(machineScope.Machine)
 	locations := machineScope.InfraCluster.ProxmoxCluster.Status.NodeLocations.Workers
-	if util.IsControlPlaneMachine(machineScope.Machine) {
+	if controlPlane {
 		locations = machineScope.InfraCluster.ProxmoxCluster.Status.NodeLocations.ControlPlane
 	}
 
-	return selectNode(ctx, client, machineScope.ProxmoxMachine, locations, machineScope.AllowedNodes(), schedulerHints)
+	return selectNode(ctx, client, machineScope.ProxmoxMachine, locations, machineScope.AllowedNodes(), schedulerHints, controlPlane)
 }
 
 func selectNode(
@@ -64,6 +65,7 @@ func selectNode(
 	locations []infrav1.NodeLocation,
 	allowedNodes []string,
 	schedulerHints *infrav1.SchedulerHints,
+	controlPlane bool,
 ) (string, error) {
 	byMemory := make(sortByAvailableMemory, len(allowedNodes))
 	for i, nodeName := range allowedNodes {
@@ -102,12 +104,29 @@ func selectNode(
 
 	sort.Sort(byReplicas)
 
-	decision := byMemory[0].Name
-	for _, info := range byReplicas {
-		// distribute round-robin when memory allows it
-		if requestedMemory < info.AvailableMemory {
-			decision = info.Name
-			break
+	var decision string
+	if free := withoutReplicas(byMemory); controlPlane && len(free) > 0 {
+		// A control plane never joins a node that holds another of its cluster's
+		// while a node free of them exists: if none of those has room, it waits.
+		// Two control planes on one node fail together, and Proxmox HA negative
+		// resource affinity would live-migrate one of them, the serving one
+		// included, as soon as the new one is registered.
+		if requestedMemory >= free[0].AvailableMemory {
+			return "", InsufficientMemoryError{
+				node:      free[0].Name,
+				available: free[0].AvailableMemory,
+				requested: requestedMemory,
+			}
+		}
+		decision = free[0].Name
+	} else {
+		decision = byMemory[0].Name
+		for _, info := range byReplicas {
+			// distribute round-robin when memory allows it
+			if requestedMemory < info.AvailableMemory {
+				decision = info.Name
+				break
+			}
 		}
 	}
 
@@ -122,6 +141,18 @@ func selectNode(
 	}
 
 	return decision, nil
+}
+
+// withoutReplicas returns the nodes that hold none of the scheduled VMs, in
+// the order given.
+func withoutReplicas(nodes []nodeInfo) []nodeInfo {
+	var free []nodeInfo
+	for _, info := range nodes {
+		if info.ScheduledVMs == 0 {
+			free = append(free, info)
+		}
+	}
+	return free
 }
 
 type resourceClient interface {

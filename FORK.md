@@ -33,6 +33,9 @@ additive and contributable upstream.
   ProxmoxMachine, up to `--provision-retry-limit`. See
   `docs/advanced-setups.md`, "Retrying a failed provisioning".
 - A running VM is stopped before it is deleted.
+- A control plane is never cloned onto a node that holds another of its
+  cluster's while a node free of them exists. See `docs/advanced-setups.md`,
+  "Control planes on separate nodes".
 
 ## Syncing with upstream
 

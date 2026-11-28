@@ -74,7 +74,7 @@ func TestSelectNode(t *testing.T) {
 
 			client := fakeResourceClient(availableMem)
 
-			node, err := selectNode(context.Background(), client, proxmoxMachine, locations, allowedNodes, &infrav1.SchedulerHints{})
+			node, err := selectNode(context.Background(), client, proxmoxMachine, locations, allowedNodes, &infrav1.SchedulerHints{}, false)
 			require.NoError(t, err)
 			require.Equal(t, expectedNode, node)
 
@@ -94,7 +94,7 @@ func TestSelectNode(t *testing.T) {
 
 		client := fakeResourceClient(availableMem)
 
-		node, err := selectNode(context.Background(), client, proxmoxMachine, locations, allowedNodes, &infrav1.SchedulerHints{})
+		node, err := selectNode(context.Background(), client, proxmoxMachine, locations, allowedNodes, &infrav1.SchedulerHints{}, false)
 		require.ErrorAs(t, err, &InsufficientMemoryError{})
 		require.Empty(t, node)
 
@@ -137,7 +137,7 @@ func TestSelectNodeEvenlySpread(t *testing.T) {
 
 			client := fakeResourceClient(availableMem)
 
-			node, err := selectNode(context.Background(), client, proxmoxMachine, locations, allowedNodes, &infrav1.SchedulerHints{})
+			node, err := selectNode(context.Background(), client, proxmoxMachine, locations, allowedNodes, &infrav1.SchedulerHints{}, false)
 			require.NoError(t, err)
 			require.Equal(t, expectedNode, node)
 
@@ -157,7 +157,7 @@ func TestSelectNodeEvenlySpread(t *testing.T) {
 
 		client := fakeResourceClient(availableMem)
 
-		node, err := selectNode(context.Background(), client, proxmoxMachine, locations, allowedNodes, &infrav1.SchedulerHints{})
+		node, err := selectNode(context.Background(), client, proxmoxMachine, locations, allowedNodes, &infrav1.SchedulerHints{}, false)
 		require.ErrorAs(t, err, &InsufficientMemoryError{})
 		require.Empty(t, node)
 
@@ -167,6 +167,41 @@ func TestSelectNodeEvenlySpread(t *testing.T) {
 			"pve3": miBytes(7), // 15 - 8 x 1
 		}
 		require.Equal(t, expectMem, availableMem)
+	})
+}
+
+func TestSelectNodeControlPlaneNeverSharesANode(t *testing.T) {
+	allowedNodes := []string{"pve1", "pve2", "pve3"}
+	requestMiB := int32(8)
+	machine := &infrav1.ProxmoxMachine{Spec: infrav1.ProxmoxMachineSpec{MemoryMiB: &requestMiB}}
+	at := func(nodes ...string) []infrav1.NodeLocation {
+		locations := make([]infrav1.NodeLocation, 0, len(nodes))
+		for _, n := range nodes {
+			locations = append(locations, infrav1.NodeLocation{Node: n})
+		}
+		return locations
+	}
+
+	t.Run("the only free node lacks room: wait, never share", func(t *testing.T) {
+		client := fakeResourceClient{"pve1": miBytes(20), "pve2": miBytes(4), "pve3": miBytes(20)}
+		locations := at("pve1", "pve3")
+
+		node, err := selectNode(context.Background(), client, machine, locations, allowedNodes, &infrav1.SchedulerHints{}, true)
+		require.Equal(t, InsufficientMemoryError{node: "pve2", available: miBytes(4), requested: miBytes(requestMiB)}, err)
+		require.Empty(t, node)
+
+		// A worker with the same inputs still lands where memory allows.
+		node, err = selectNode(context.Background(), client, machine, locations, allowedNodes, &infrav1.SchedulerHints{}, false)
+		require.NoError(t, err)
+		require.Contains(t, []string{"pve1", "pve3"}, node)
+	})
+
+	t.Run("every node holds one: the fewest with room", func(t *testing.T) {
+		client := fakeResourceClient{"pve1": miBytes(20), "pve2": miBytes(30), "pve3": miBytes(25)}
+
+		node, err := selectNode(context.Background(), client, machine, at("pve1", "pve2", "pve2", "pve3", "pve3"), allowedNodes, &infrav1.SchedulerHints{}, true)
+		require.NoError(t, err)
+		require.Equal(t, "pve1", node)
 	})
 }
 
